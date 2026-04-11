@@ -11,6 +11,7 @@ serde_json = "1.0"
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sha2 = "0.10"
 
 [lints.rust]
 rust_2018_idioms = "deny"
