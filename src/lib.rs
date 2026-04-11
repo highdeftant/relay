@@ -1,3 +1,4 @@
+pub mod avatar;
 pub mod cli;
 pub mod config;
 pub mod dashboard;
