@@ -11,6 +11,8 @@ serde_json = "1.0"
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 sha2 = "0.10"
 
 [lints.rust]

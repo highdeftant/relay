@@ -1,3 +1,4 @@
+pub mod app;
 pub mod avatar;
 pub mod cli;
 pub mod config;
