@@ -124,6 +124,37 @@ pub fn save_agents(config: &AppConfig, agents: &HashMap<String, AgentPresence>) 
     Ok(())
 }
 
+pub fn load_channel_events(
+    config: &AppConfig,
+    channel: &str,
+    limit: usize,
+) -> Result<Vec<MessageEvent>> {
+    let path = config.channels_dir.join(format!("{channel}.jsonl"));
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = fs::read_to_string(path)?;
+    let mut events = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(event) = serde_json::from_str::<MessageEvent>(trimmed) {
+            events.push(event);
+        }
+    }
+
+    if events.len() > limit {
+        let keep_from = events.len().saturating_sub(limit);
+        events.drain(0..keep_from);
+    }
+
+    Ok(events)
+}
+
 fn default_profiles() -> Vec<AgentProfile> {
     vec![AgentProfile {
         name: "Hermes".to_string(),

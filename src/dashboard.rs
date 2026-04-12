@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -20,7 +20,7 @@ use crate::{
     app::{AppState, Tab},
     avatar,
     config::AppConfig,
-    storage,
+    protocol, storage,
 };
 
 const COLOR_VOID: Color = Color::Rgb(10, 10, 15);
@@ -31,6 +31,10 @@ const COLOR_CYAN: Color = Color::Rgb(0, 229, 255);
 const COLOR_AMBER: Color = Color::Rgb(255, 208, 64);
 const COLOR_ORANGE: Color = Color::Rgb(255, 107, 0);
 const COLOR_RED: Color = Color::Rgb(255, 0, 51);
+
+enum UiAction {
+    SendChatMessage,
+}
 
 /// Entry point for `relay watch`.
 pub async fn watch(config: AppConfig) -> Result<()> {
@@ -56,7 +60,7 @@ async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Res
     loop {
         terminal.draw(|frame| draw(frame, &state))?;
 
-        if last_refresh.elapsed() >= Duration::from_secs(1) {
+        if last_refresh.elapsed() >= Duration::from_millis(900) {
             refresh_state(&config, &mut state);
             last_refresh = Instant::now();
         }
@@ -67,7 +71,36 @@ async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Res
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            handle_key(&mut state, key.code);
+
+            if let Some(action) = handle_key(&mut state, key.code, key.modifiers) {
+                match action {
+                    UiAction::SendChatMessage => {
+                        let msg = state.chat_input.trim().to_string();
+                        if !msg.is_empty() {
+                            match protocol::send_message_quiet(
+                                &config,
+                                &state.chat_agent,
+                                &state.active_channel,
+                                &msg,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    state.chat_input.clear();
+                                    refresh_state(&config, &mut state);
+                                }
+                                Err(error) => {
+                                    state.logs.push(format!("send_message failed: {error}"));
+                                    if state.logs.len() > 200 {
+                                        let keep_from = state.logs.len().saturating_sub(200);
+                                        state.logs.drain(0..keep_from);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if state.should_quit {
@@ -88,35 +121,85 @@ fn refresh_state(config: &AppConfig, state: &mut AppState) {
         }
         Err(error) => {
             state.logs.push(format!("load_agents failed: {error}"));
-            if state.logs.len() > 200 {
-                let keep_from = state.logs.len().saturating_sub(200);
-                state.logs.drain(0..keep_from);
-            }
         }
+    }
+
+    match storage::load_channel_events(config, &state.active_channel, 200) {
+        Ok(events) => state.messages = events,
+        Err(error) => state.logs.push(format!(
+            "load_channel_events failed for {}: {error}",
+            state.active_channel
+        )),
+    }
+
+    if state.logs.len() > 200 {
+        let keep_from = state.logs.len().saturating_sub(200);
+        state.logs.drain(0..keep_from);
     }
 }
 
-fn handle_key(state: &mut AppState, code: KeyCode) {
+fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> Option<UiAction> {
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => state.should_quit = true,
-        KeyCode::Tab => state.active_tab = state.active_tab.next(),
-        KeyCode::BackTab => state.active_tab = state.active_tab.prev(),
-        KeyCode::Char('1') => state.active_tab = Tab::Chat,
-        KeyCode::Char('2') => state.active_tab = Tab::Agents,
-        KeyCode::Char('3') => state.active_tab = Tab::Files,
-        KeyCode::Char('4') => state.active_tab = Tab::Logs,
-        KeyCode::Down | KeyCode::Char('j') => {
-            if state.active_tab == Tab::Agents {
-                state.select_next_agent();
-            }
+        KeyCode::Char('q') if !state.active_tab.eq(&Tab::Chat) => {
+            state.should_quit = true;
+            return None;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if state.active_tab == Tab::Agents {
-                state.select_prev_agent();
-            }
+        KeyCode::Esc => {
+            state.should_quit = true;
+            return None;
+        }
+        KeyCode::Tab => {
+            state.active_tab = state.active_tab.next();
+            return None;
+        }
+        KeyCode::BackTab => {
+            state.active_tab = state.active_tab.prev();
+            return None;
+        }
+        KeyCode::Char('1') => {
+            state.active_tab = Tab::Chat;
+            return None;
+        }
+        KeyCode::Char('2') => {
+            state.active_tab = Tab::Agents;
+            return None;
+        }
+        KeyCode::Char('3') => {
+            state.active_tab = Tab::Files;
+            return None;
+        }
+        KeyCode::Char('4') => {
+            state.active_tab = Tab::Logs;
+            return None;
         }
         _ => {}
     }
+
+    match state.active_tab {
+        Tab::Agents => match code {
+            KeyCode::Down | KeyCode::Char('j') => state.select_next_agent(),
+            KeyCode::Up | KeyCode::Char('k') => state.select_prev_agent(),
+            _ => {}
+        },
+        Tab::Chat => match code {
+            KeyCode::Enter => return Some(UiAction::SendChatMessage),
+            KeyCode::Backspace => {
+                state.chat_input.pop();
+            }
+            KeyCode::Char('q') if state.chat_input.is_empty() => {
+                state.should_quit = true;
+            }
+            KeyCode::Char(c) => {
+                if !modifiers.contains(KeyModifiers::CONTROL) {
+                    state.chat_input.push(c);
+                }
+            }
+            _ => {}
+        },
+        Tab::Files | Tab::Logs => {}
+    }
+
+    None
 }
 
 fn draw(frame: &mut Frame<'_>, state: &AppState) {
@@ -152,8 +235,11 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_GREEN),
         ),
         Span::styled("  |  ", Style::default().fg(COLOR_STEEL)),
-        Span::styled("TAB: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(state.active_tab.label(), Style::default().fg(COLOR_AMBER)),
+        Span::styled("CH: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            format!("#{}", state.active_channel),
+            Style::default().fg(COLOR_AMBER),
+        ),
     ]))
     .block(
         Block::default()
@@ -195,11 +281,104 @@ fn draw_tabs(frame: &mut Frame<'_>, area: Rect, active: Tab) {
 
 fn draw_content(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     match state.active_tab {
-        Tab::Chat => draw_placeholder(frame, area, " #general ", "[chat feed coming next]"),
+        Tab::Chat => draw_chat_panel(frame, area, state),
         Tab::Agents => draw_agents_panel(frame, area, state),
         Tab::Files => draw_placeholder(frame, area, " ファイル//FILES ", "[files tab in progress]"),
-        Tab::Logs => draw_placeholder(frame, area, " ログ//LOGS ", "[logs tab in progress]"),
+        Tab::Logs => draw_logs_panel(frame, area, state),
     }
+}
+
+fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(area);
+
+    let mut lines = vec![Line::from("")];
+    let feed_height = split[0].height.saturating_sub(3) as usize;
+
+    let start = state.messages.len().saturating_sub(feed_height.max(1));
+    for msg in state.messages.iter().skip(start) {
+        let ts = human_ts(&msg.timestamp);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" [{ts}] "), Style::default().fg(COLOR_STEEL)),
+            Span::styled(format!("{}", msg.agent), Style::default().fg(COLOR_CYAN)),
+            Span::styled(": ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(truncate(&msg.message, 72), Style::default().fg(COLOR_GHOST)),
+        ]));
+    }
+
+    if state.messages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no messages yet",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    }
+
+    let feed = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(
+                format!(" #{} ", state.active_channel),
+                Style::default().fg(COLOR_CYAN),
+            )),
+    );
+
+    frame.render_widget(feed, split[0]);
+
+    let input = Paragraph::new(Line::from(vec![
+        Span::styled(
+            format!(" {} > ", state.chat_agent),
+            Style::default().fg(COLOR_AMBER),
+        ),
+        Span::styled(
+            format!("{}█", state.chat_input),
+            Style::default().fg(COLOR_GHOST),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_GREEN))
+            .title(Span::styled(
+                " INPUT (Enter to send) ",
+                Style::default().fg(COLOR_GREEN),
+            )),
+    );
+    frame.render_widget(input, split[1]);
+}
+
+fn draw_logs_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![Line::from("")];
+    let cap = area.height.saturating_sub(3) as usize;
+    let start = state.logs.len().saturating_sub(cap.max(1));
+
+    for log in state.logs.iter().skip(start) {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", truncate(log, 100)),
+            Style::default().fg(COLOR_STEEL),
+        )));
+    }
+
+    if state.logs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no logs",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(
+                " ログ//LOGS ",
+                Style::default().fg(COLOR_CYAN),
+            )),
+    );
+
+    frame.render_widget(widget, area);
 }
 
 fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str) {
@@ -253,15 +432,6 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             let role = agent.role.as_deref().unwrap_or("-");
             let task = agent.task.as_deref().unwrap_or("");
             let marker = if selected { ">" } else { " " };
-
-            let mut text = format!(
-                " {marker} {dot} {:<10} [{:<10}] {:<8}",
-                agent.name, role, agent.status
-            );
-            if !task.is_empty() {
-                text.push_str(" :: ");
-                text.push_str(task);
-            }
 
             let style = if selected {
                 Style::default()
@@ -390,10 +560,17 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let chat_hint = if state.active_tab == Tab::Chat {
+        "[Enter] Send "
+    } else {
+        ""
+    };
+
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" [Tab] Switch ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[1-4] Tabs ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[j/k] Select Agent ", Style::default().fg(COLOR_STEEL)),
+        Span::styled(chat_hint, Style::default().fg(COLOR_STEEL)),
         Span::styled("[q] Quit ", Style::default().fg(COLOR_STEEL)),
         Span::styled("│", Style::default().fg(COLOR_STEEL)),
         Span::styled(
@@ -423,4 +600,13 @@ fn truncate(input: &str, max: usize) -> String {
         .collect::<String>();
     out.push('…');
     out
+}
+
+fn human_ts(epoch: &str) -> String {
+    let parsed = epoch.parse::<u64>().unwrap_or(0);
+    let hhmmss = parsed % 86_400;
+    let h = hhmmss / 3600;
+    let m = (hhmmss % 3600) / 60;
+    let s = hhmmss % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }

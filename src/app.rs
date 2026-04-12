@@ -1,6 +1,6 @@
 //! Application state for the TUI dashboard.
 
-use crate::storage::AgentPresence;
+use crate::storage::{AgentPresence, MessageEvent};
 
 /// Which tab is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,10 @@ pub struct AppState {
     pub agents: Vec<AgentPresence>,
     pub selected_agent: usize,
     pub channels: Vec<String>,
-    pub messages: Vec<String>,
+    pub active_channel: String,
+    pub messages: Vec<MessageEvent>,
+    pub chat_input: String,
+    pub chat_agent: String,
     pub logs: Vec<String>,
     pub should_quit: bool,
 }
@@ -70,7 +73,10 @@ impl AppState {
             agents: Vec::new(),
             selected_agent: 0,
             channels: vec!["general".into()],
+            active_channel: "general".into(),
             messages: Vec::new(),
+            chat_input: String::new(),
+            chat_agent: "local".into(),
             logs: Vec::new(),
             should_quit: false,
         }

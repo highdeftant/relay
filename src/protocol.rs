@@ -56,6 +56,29 @@ pub async fn send_message(
     handle_simple_response(response)
 }
 
+pub async fn send_message_quiet(
+    config: &AppConfig,
+    agent: &str,
+    channel: &str,
+    message: &str,
+) -> Result<()> {
+    let response = send_request(
+        config,
+        &ClientRequest::Send {
+            agent: agent.to_string(),
+            channel: channel.to_string(),
+            message: message.to_string(),
+        },
+    )
+    .await?;
+
+    match response {
+        ServerResponse::Ok { .. } => Ok(()),
+        ServerResponse::Error { message } => bail!(message),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
 pub async fn join_agent(config: AppConfig, agent: String, role: Option<String>) -> Result<()> {
     let response = send_request(&config, &ClientRequest::Join { agent, role }).await?;
     handle_simple_response(response)
