@@ -20,6 +20,7 @@ use crate::{
     app::{AppState, Tab},
     avatar,
     config::AppConfig,
+    hermes,
     protocol, storage,
 };
 
@@ -35,6 +36,8 @@ const COLOR_RED: Color = Color::Rgb(248, 113, 113);
 
 enum UiAction {
     SendChatMessage,
+    NextChannel,
+    PrevChannel,
 }
 
 /// Entry point for `relay watch`.
@@ -100,6 +103,14 @@ async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Res
                             }
                         }
                     }
+                    UiAction::NextChannel => {
+                        state.select_next_channel();
+                        refresh_state(&config, &mut state);
+                    }
+                    UiAction::PrevChannel => {
+                        state.select_prev_channel();
+                        refresh_state(&config, &mut state);
+                    }
                 }
             }
         }
@@ -113,6 +124,8 @@ async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Res
 }
 
 fn refresh_state(config: &AppConfig, state: &mut AppState) {
+    state.hermes_snapshot = hermes::load_snapshot();
+
     match storage::load_agents(config) {
         Ok(map) => {
             let mut rows = map.into_values().collect::<Vec<_>>();
@@ -123,6 +136,11 @@ fn refresh_state(config: &AppConfig, state: &mut AppState) {
         Err(error) => {
             state.logs.push(format!("load_agents failed: {error}"));
         }
+    }
+
+    match storage::list_channels(config) {
+        Ok(channels) => state.set_channels(channels),
+        Err(error) => state.logs.push(format!("list_channels failed: {error}")),
     }
 
     match storage::load_channel_events(config, &state.active_channel, 200) {
@@ -166,15 +184,15 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             return None;
         }
         KeyCode::Char('3') => {
-            state.active_tab = Tab::Files;
+            state.active_tab = Tab::Skills;
             return None;
         }
         KeyCode::Char('4') => {
-            state.active_tab = Tab::Logs;
+            state.active_tab = Tab::Sessions;
             return None;
         }
         KeyCode::Char('5') => {
-            state.active_tab = Tab::Activity;
+            state.active_tab = Tab::Memory;
             return None;
         }
         KeyCode::Char('6') => {
@@ -188,10 +206,13 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
         Tab::Agents => match code {
             KeyCode::Down | KeyCode::Char('j') => state.select_next_agent(),
             KeyCode::Up | KeyCode::Char('k') => state.select_prev_agent(),
+            KeyCode::Char('d') => state.open_dm_with_selected(),
             _ => {}
         },
         Tab::Chat => match code {
             KeyCode::Enter => return Some(UiAction::SendChatMessage),
+            KeyCode::Char(']') if state.chat_input.is_empty() => return Some(UiAction::NextChannel),
+            KeyCode::Char('[') if state.chat_input.is_empty() => return Some(UiAction::PrevChannel),
             KeyCode::Backspace => {
                 state.chat_input.pop();
             }
@@ -205,7 +226,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             }
             _ => {}
         },
-        Tab::Files | Tab::Logs | Tab::Activity | Tab::System => {}
+        Tab::Skills | Tab::Sessions | Tab::Memory | Tab::System => {}
     }
 
     None
@@ -292,9 +313,9 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     match state.active_tab {
         Tab::Chat => draw_chat_panel(frame, area, state),
         Tab::Agents => draw_agents_panel(frame, area, state),
-        Tab::Files => draw_placeholder(frame, area, " ファイル//FILES ", "[files tab in progress]"),
-        Tab::Logs => draw_logs_panel(frame, area, state),
-        Tab::Activity => draw_activity_panel(frame, area, state),
+        Tab::Skills => draw_skills_panel(frame, area, state),
+        Tab::Sessions => draw_sessions_panel(frame, area, state),
+        Tab::Memory => draw_memory_panel(frame, area, state),
         Tab::System => draw_system_panel(frame, area, state),
     }
 }
@@ -326,12 +347,25 @@ fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         )));
     }
 
+    let channels_line = state
+        .channels
+        .iter()
+        .map(|channel| {
+            if channel == &state.active_channel {
+                format!("[{channel}]")
+            } else {
+                channel.clone()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+
     let feed = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
-                format!(" #{} ", state.active_channel),
+                format!(" #{}  [{} / {}] ", state.active_channel, state.channels.len(), channels_line),
                 Style::default().fg(COLOR_CYAN),
             )),
     );
@@ -360,76 +394,153 @@ fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(input, split[1]);
 }
 
-fn draw_logs_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_skills_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from("")];
-    let cap = area.height.saturating_sub(3) as usize;
-    let start = state.logs.len().saturating_sub(cap.max(1));
+    let snapshot = &state.hermes_snapshot;
 
-    for log in state.logs.iter().skip(start) {
+    lines.push(Line::from(vec![
+        Span::styled("  Hermes skills detected: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{}", snapshot.skill_count), Style::default().fg(COLOR_GREEN)),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("  Skills root: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            if snapshot.skills_root_exists { "present" } else { "missing" },
+            Style::default().fg(if snapshot.skills_root_exists {
+                COLOR_GREEN
+            } else {
+                COLOR_RED
+            }),
+        ),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  categories",
+        Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+    )));
+
+    if snapshot.skill_categories.is_empty() {
         lines.push(Line::from(Span::styled(
-            format!("  {}", truncate(log, 100)),
+            "  none found",
             Style::default().fg(COLOR_STEEL),
         )));
-    }
-
-    if state.logs.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no logs",
-            Style::default().fg(COLOR_STEEL),
-        )));
+    } else {
+        for category in snapshot.skill_categories.iter().take(16) {
+            lines.push(Line::from(vec![
+                Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
+                Span::styled(category.clone(), Style::default().fg(COLOR_GHOST)),
+            ]));
+        }
     }
 
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(
-                " ログ//LOGS ",
-                Style::default().fg(COLOR_CYAN),
-            )),
+            .title(Span::styled(" HERMES//SKILLS ", Style::default().fg(COLOR_CYAN))),
     );
 
     frame.render_widget(widget, area);
 }
 
-fn draw_activity_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_sessions_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from("")];
-    let cap = area.height.saturating_sub(4) as usize;
+    let snapshot = &state.hermes_snapshot;
 
-    let msg_count = cap.min(state.messages.len());
-    let log_count = cap.saturating_sub(msg_count).min(state.logs.len());
+    lines.push(Line::from(vec![
+        Span::styled("  Session files: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{}", snapshot.session_count), Style::default().fg(COLOR_GREEN)),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  recent",
+        Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+    )));
 
-    if msg_count == 0 && log_count == 0 {
+    if snapshot.recent_sessions.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no recent activity",
+            "  none found",
             Style::default().fg(COLOR_STEEL),
         )));
-    }
-
-    for msg in state.messages.iter().rev().take(msg_count).rev() {
-        lines.push(Line::from(vec![
-            Span::styled("  MSG ", Style::default().fg(COLOR_AMBER)),
-            Span::styled(format!("{}", msg.agent), Style::default().fg(COLOR_CYAN)),
-            Span::styled(": ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(truncate(&msg.message, 72), Style::default().fg(COLOR_GHOST)),
-        ]));
-    }
-
-    for log in state.logs.iter().rev().take(log_count).rev() {
-        lines.push(Line::from(vec![
-            Span::styled("  LOG ", Style::default().fg(COLOR_RED)),
-            Span::styled(truncate(log, 82), Style::default().fg(COLOR_STEEL)),
-        ]));
+    } else {
+        for session in &snapshot.recent_sessions {
+            lines.push(Line::from(vec![
+                Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
+                Span::styled(truncate(session, 72), Style::default().fg(COLOR_GHOST)),
+            ]));
+        }
     }
 
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(
-                " ACTIVITY//FEED ",
-                Style::default().fg(COLOR_CYAN),
-            )),
+            .title(Span::styled(" HERMES//SESSIONS ", Style::default().fg(COLOR_CYAN))),
+    );
+
+    frame.render_widget(widget, area);
+}
+
+fn draw_memory_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let snapshot = &state.hermes_snapshot;
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  state.db: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                if snapshot.state_db_exists {
+                    format!("present ({} bytes)", snapshot.state_db_bytes)
+                } else {
+                    "missing".to_string()
+                },
+                Style::default().fg(if snapshot.state_db_exists {
+                    COLOR_GREEN
+                } else {
+                    COLOR_RED
+                }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  honcho hosts: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", snapshot.honcho_hosts), Style::default().fg(COLOR_CYAN)),
+        ]),
+        Line::from(vec![
+            Span::styled("  auth.json: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                if snapshot.auth_exists { "present" } else { "missing" },
+                Style::default().fg(if snapshot.auth_exists { COLOR_GREEN } else { COLOR_RED }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  processes.json: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                if snapshot.processes_file_exists {
+                    format!("present ({} entries)", snapshot.known_process_count)
+                } else {
+                    "missing".to_string()
+                },
+                Style::default().fg(if snapshot.processes_file_exists {
+                    COLOR_GREEN
+                } else {
+                    COLOR_RED
+                }),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Note: relay supports all agents; Hermes adds local skill/session/memory visibility.",
+            Style::default().fg(COLOR_STEEL),
+        )),
+    ];
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(" HERMES//MEMORY ", Style::default().fg(COLOR_CYAN))),
     );
 
     frame.render_widget(widget, area);
@@ -456,7 +567,7 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Line::from(vec![
             Span::styled("  Tabs: ", Style::default().fg(COLOR_GHOST)),
             Span::styled(
-                "CHAT AGENTS FILES LOGS ACTIVITY SYSTEM",
+                "CHAT AGENTS SKILLS SESSIONS MEMORY SYSTEM",
                 Style::default().fg(COLOR_CYAN),
             ),
         ]),
@@ -497,7 +608,7 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "  next: channel switching + skills/memory panes",
+            "  relay is generic-first; Hermes metadata is additive when available.",
             Style::default().fg(COLOR_STEEL),
         )),
     ];
@@ -508,27 +619,6 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
                 " SYSTEM//STATUS ",
-                Style::default().fg(COLOR_CYAN),
-            )),
-    );
-
-    frame.render_widget(widget, area);
-}
-
-fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str) {
-    let widget = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {body}"),
-            Style::default().fg(COLOR_STEEL),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(
-                title.to_string(),
                 Style::default().fg(COLOR_CYAN),
             )),
     );
@@ -566,6 +656,17 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             let role = agent.role.as_deref().unwrap_or("-");
             let task = agent.task.as_deref().unwrap_or("");
             let marker = if selected { ">" } else { " " };
+            let skills = state
+                .hermes_snapshot
+                .profile_skill_counts
+                .get(&agent.name.to_lowercase())
+                .copied()
+                .unwrap_or(0);
+            let skills_tag = if skills > 0 {
+                format!(" | s:{skills}")
+            } else {
+                String::new()
+            };
 
             let style = if selected {
                 Style::default()
@@ -579,7 +680,7 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 Span::styled(format!(" {marker} "), style),
                 Span::styled(format!("{dot} "), Style::default().fg(status_color)),
                 Span::styled(
-                    format!("{:<10} [{:<10}] {:<8}", agent.name, role, agent.status),
+                    format!("{:<10} [{:<10}] {:<8}{}", agent.name, role, agent.status, skills_tag),
                     style,
                 ),
                 Span::styled(
@@ -654,6 +755,16 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             format!("  status: {}", agent.status),
             Style::default().fg(status_color(&agent.status)),
         )));
+        let profile_skills = state
+            .hermes_snapshot
+            .profile_skill_counts
+            .get(&agent.name.to_lowercase())
+            .copied()
+            .unwrap_or(0);
+        lines.push(Line::from(Span::styled(
+            format!("  hermes skills: {}", profile_skills),
+            Style::default().fg(COLOR_CYAN),
+        )));
         lines.push(Line::from(Span::styled(
             format!("  last_seen_epoch: {}", agent.last_seen_epoch),
             Style::default().fg(COLOR_STEEL),
@@ -695,7 +806,13 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let chat_hint = if state.active_tab == Tab::Chat {
-        "[Enter] Send "
+        "[Enter] Send [[]/[ ]] Channels "
+    } else {
+        ""
+    };
+
+    let agent_hint = if state.active_tab == Tab::Agents {
+        "[d] DM Selected "
     } else {
         ""
     };
@@ -704,6 +821,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Span::styled(" [Tab] Switch ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[1-6] Tabs ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[j/k] Select Agent ", Style::default().fg(COLOR_STEEL)),
+        Span::styled(agent_hint, Style::default().fg(COLOR_STEEL)),
         Span::styled(chat_hint, Style::default().fg(COLOR_STEEL)),
         Span::styled("[q] Quit ", Style::default().fg(COLOR_STEEL)),
         Span::styled("│", Style::default().fg(COLOR_STEEL)),

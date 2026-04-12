@@ -1,15 +1,18 @@
 //! Application state for the TUI dashboard.
 
-use crate::storage::{AgentPresence, MessageEvent};
+use crate::{
+    hermes::HermesSnapshot,
+    storage::{AgentPresence, MessageEvent},
+};
 
 /// Which tab is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Chat,
     Agents,
-    Files,
-    Logs,
-    Activity,
+    Skills,
+    Sessions,
+    Memory,
     System,
 }
 
@@ -17,9 +20,9 @@ impl Tab {
     pub const ALL: [Tab; 6] = [
         Tab::Chat,
         Tab::Agents,
-        Tab::Files,
-        Tab::Logs,
-        Tab::Activity,
+        Tab::Skills,
+        Tab::Sessions,
+        Tab::Memory,
         Tab::System,
     ];
 
@@ -27,9 +30,9 @@ impl Tab {
         match self {
             Tab::Chat => "CHAT",
             Tab::Agents => "AGENTS",
-            Tab::Files => "FILES",
-            Tab::Logs => "LOGS",
-            Tab::Activity => "ACTIVITY",
+            Tab::Skills => "SKILLS",
+            Tab::Sessions => "SESSIONS",
+            Tab::Memory => "MEMORY",
             Tab::System => "SYSTEM",
         }
     }
@@ -38,9 +41,9 @@ impl Tab {
         match self {
             Tab::Chat => 0,
             Tab::Agents => 1,
-            Tab::Files => 2,
-            Tab::Logs => 3,
-            Tab::Activity => 4,
+            Tab::Skills => 2,
+            Tab::Sessions => 3,
+            Tab::Memory => 4,
             Tab::System => 5,
         }
     }
@@ -49,9 +52,9 @@ impl Tab {
         match i {
             0 => Tab::Chat,
             1 => Tab::Agents,
-            2 => Tab::Files,
-            3 => Tab::Logs,
-            4 => Tab::Activity,
+            2 => Tab::Skills,
+            3 => Tab::Sessions,
+            4 => Tab::Memory,
             5 => Tab::System,
             _ => Tab::Chat,
         }
@@ -78,6 +81,7 @@ pub struct AppState {
     pub chat_input: String,
     pub chat_agent: String,
     pub logs: Vec<String>,
+    pub hermes_snapshot: HermesSnapshot,
     pub should_quit: bool,
 }
 
@@ -93,8 +97,33 @@ impl AppState {
             chat_input: String::new(),
             chat_agent: "local".into(),
             logs: Vec::new(),
+            hermes_snapshot: HermesSnapshot::default(),
             should_quit: false,
         }
+    }
+
+    pub fn open_dm_with_selected(&mut self) {
+        let Some(agent) = self.selected_agent_ref() else {
+            return;
+        };
+
+        let sender = self.chat_agent.trim().to_string();
+        let recipient = agent.name.trim().to_string();
+        if sender.is_empty() || recipient.is_empty() || sender == recipient {
+            return;
+        }
+
+        let mut parts = [sender, recipient];
+        parts.sort();
+        let channel = format!("dm-{}__{}", parts[0], parts[1]);
+
+        if !self.channels.iter().any(|existing| existing == &channel) {
+            self.channels.push(channel.clone());
+            self.channels.sort();
+        }
+
+        self.active_channel = channel;
+        self.active_tab = Tab::Chat;
     }
 
     pub fn clamp_selection(&mut self) {
@@ -104,6 +133,49 @@ impl AppState {
         }
         if self.selected_agent >= self.agents.len() {
             self.selected_agent = self.agents.len().saturating_sub(1);
+        }
+    }
+
+    pub fn set_channels(&mut self, mut channels: Vec<String>) {
+        if channels.is_empty() {
+            channels.push("general".to_string());
+        }
+        channels.sort();
+        channels.dedup();
+
+        self.channels = channels;
+        if !self.channels.iter().any(|c| c == &self.active_channel) {
+            self.active_channel = self.channels.first().cloned().unwrap_or_default();
+        }
+    }
+
+    pub fn select_next_channel(&mut self) {
+        if self.channels.is_empty() {
+            return;
+        }
+        let idx = self
+            .channels
+            .iter()
+            .position(|c| c == &self.active_channel)
+            .unwrap_or(0);
+        let next_idx = (idx + 1) % self.channels.len();
+        if let Some(next) = self.channels.get(next_idx) {
+            self.active_channel = next.clone();
+        }
+    }
+
+    pub fn select_prev_channel(&mut self) {
+        if self.channels.is_empty() {
+            return;
+        }
+        let idx = self
+            .channels
+            .iter()
+            .position(|c| c == &self.active_channel)
+            .unwrap_or(0);
+        let prev_idx = (idx + self.channels.len() - 1) % self.channels.len();
+        if let Some(prev) = self.channels.get(prev_idx) {
+            self.active_channel = prev.clone();
         }
     }
 
@@ -123,5 +195,49 @@ impl AppState {
 
     pub fn selected_agent_ref(&self) -> Option<&AgentPresence> {
         self.agents.get(self.selected_agent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, Tab};
+    use crate::storage::AgentPresence;
+
+    #[test]
+    fn open_dm_with_selected_creates_stable_channel_and_switches_to_chat() {
+        let mut state = AppState::new();
+        state.chat_agent = "hermes".to_string();
+        state.agents = vec![AgentPresence::new(
+            "codex".to_string(),
+            Some("coder".to_string()),
+            "online".to_string(),
+            None,
+        )];
+        state.selected_agent = 0;
+
+        state.open_dm_with_selected();
+
+        assert_eq!(state.active_channel, "dm-codex__hermes");
+        assert!(state.channels.iter().any(|c| c == "dm-codex__hermes"));
+        assert_eq!(state.active_tab, Tab::Chat);
+    }
+
+    #[test]
+    fn channel_cycle_wraps_forward_and_back() {
+        let mut state = AppState::new();
+        state.channels = vec!["general".to_string(), "dev".to_string(), "review".to_string()];
+        state.active_channel = "general".to_string();
+
+        state.select_next_channel();
+        assert_eq!(state.active_channel, "dev");
+
+        state.select_next_channel();
+        assert_eq!(state.active_channel, "review");
+
+        state.select_next_channel();
+        assert_eq!(state.active_channel, "general");
+
+        state.select_prev_channel();
+        assert_eq!(state.active_channel, "review");
     }
 }

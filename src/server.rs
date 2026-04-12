@@ -123,6 +123,12 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             channel,
             message,
         } => {
+            if let Err(policy_error) = validate_channel_policy(&channel, &message) {
+                return ServerResponse::Error {
+                    message: policy_error,
+                };
+            }
+
             let event = MessageEvent::new(agent.clone(), channel, message);
             if let Err(error) = crate::storage::append_event(&state.config, &event) {
                 return ServerResponse::Error {
@@ -221,4 +227,92 @@ fn into_error_response(error: anyhow::Error) -> ServerResponse {
 #[allow(dead_code)]
 fn to_anyhow(message: &str) -> anyhow::Error {
     anyhow!(message.to_string())
+}
+
+fn validate_channel_policy(channel: &str, message: &str) -> Result<(), String> {
+    if is_dm_channel(channel) {
+        return Ok(());
+    }
+
+    let normalized_channel = channel.trim().to_lowercase();
+    let normalized_message = message.trim().to_lowercase();
+
+    let is_failure = contains_any(
+        &normalized_message,
+        &["fail", "error", "panic", "down", "critical", "incident", "timeout"],
+    );
+    let is_review = contains_any(
+        &normalized_message,
+        &[
+            "review",
+            "lgtm",
+            "approve",
+            "requested changes",
+            "code review",
+        ],
+    );
+    let is_status = contains_any(
+        &normalized_message,
+        &[
+            "status",
+            "handoff",
+            "starting",
+            "started",
+            "online",
+            "offline",
+            "idle",
+            "working",
+        ],
+    );
+
+    if is_failure && normalized_channel != "alerts" {
+        return Err("policy: failure/error messages must go to #alerts".to_string());
+    }
+    if is_review && normalized_channel != "review" {
+        return Err("policy: review messages must go to #review".to_string());
+    }
+    if is_status && normalized_channel != "general" {
+        return Err("policy: status/handoff messages must go to #general".to_string());
+    }
+
+    if normalized_channel == "alerts" && !is_failure {
+        return Err("policy: #alerts is failures only".to_string());
+    }
+
+    Ok(())
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_dm_channel(channel: &str) -> bool {
+    channel.trim().to_lowercase().starts_with("dm-")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn policy_rejects_failure_outside_alerts() {
+        let result = super::validate_channel_policy("dev", "build failed with error");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn policy_accepts_failure_in_alerts() {
+        let result = super::validate_channel_policy("alerts", "build failed with error");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn policy_rejects_review_outside_review_channel() {
+        let result = super::validate_channel_policy("general", "code review requested");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn policy_accepts_dm_anything() {
+        let result = super::validate_channel_policy("dm-codex__hermes", "status update here");
+        assert!(result.is_ok());
+    }
 }

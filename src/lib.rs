@@ -3,6 +3,7 @@ pub mod avatar;
 pub mod cli;
 pub mod config;
 pub mod dashboard;
+pub mod hermes;
 pub mod profiles;
 pub mod protocol;
 pub mod server;

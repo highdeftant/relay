@@ -155,6 +155,39 @@ pub fn load_channel_events(
     Ok(events)
 }
 
+pub fn list_channels(config: &AppConfig) -> Result<Vec<String>> {
+    let mut channels = vec![
+        "general".to_string(),
+        "ops".to_string(),
+        "dev".to_string(),
+        "review".to_string(),
+        "alerts".to_string(),
+        "research".to_string(),
+    ];
+
+    if config.channels_dir.exists() {
+        for row in fs::read_dir(&config.channels_dir)? {
+            let row = row?;
+            if !row.file_type()?.is_file() {
+                continue;
+            }
+            let name = row.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+            let channel = name.trim_end_matches(".jsonl").to_string();
+            if channel.is_empty() {
+                continue;
+            }
+            channels.push(channel);
+        }
+    }
+
+    channels.sort();
+    channels.dedup();
+    Ok(channels)
+}
+
 fn default_profiles() -> Vec<AgentProfile> {
     vec![AgentProfile {
         name: "Hermes".to_string(),
