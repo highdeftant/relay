@@ -23,14 +23,15 @@ use crate::{
     protocol, storage,
 };
 
-const COLOR_VOID: Color = Color::Rgb(10, 10, 15);
-const COLOR_STEEL: Color = Color::Rgb(42, 42, 53);
-const COLOR_GHOST: Color = Color::Rgb(232, 232, 240);
-const COLOR_GREEN: Color = Color::Rgb(0, 255, 65);
-const COLOR_CYAN: Color = Color::Rgb(0, 229, 255);
-const COLOR_AMBER: Color = Color::Rgb(255, 208, 64);
-const COLOR_ORANGE: Color = Color::Rgb(255, 107, 0);
-const COLOR_RED: Color = Color::Rgb(255, 0, 51);
+// Muted terminal theme (less neon, better readability)
+const COLOR_VOID: Color = Color::Rgb(11, 15, 20);
+const COLOR_STEEL: Color = Color::Rgb(44, 52, 64);
+const COLOR_GHOST: Color = Color::Rgb(199, 208, 220);
+const COLOR_GREEN: Color = Color::Rgb(110, 231, 168);
+const COLOR_CYAN: Color = Color::Rgb(125, 211, 252);
+const COLOR_AMBER: Color = Color::Rgb(251, 191, 36);
+const COLOR_ORANGE: Color = Color::Rgb(245, 158, 11);
+const COLOR_RED: Color = Color::Rgb(248, 113, 113);
 
 enum UiAction {
     SendChatMessage,
