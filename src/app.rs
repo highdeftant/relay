@@ -56,6 +56,7 @@ impl Tab {
 pub struct AppState {
     pub active_tab: Tab,
     pub agents: Vec<AgentPresence>,
+    pub selected_agent: usize,
     pub channels: Vec<String>,
     pub messages: Vec<String>,
     pub logs: Vec<String>,
@@ -67,10 +68,39 @@ impl AppState {
         Self {
             active_tab: Tab::Agents,
             agents: Vec::new(),
+            selected_agent: 0,
             channels: vec!["general".into()],
             messages: Vec::new(),
             logs: Vec::new(),
             should_quit: false,
         }
+    }
+
+    pub fn clamp_selection(&mut self) {
+        if self.agents.is_empty() {
+            self.selected_agent = 0;
+            return;
+        }
+        if self.selected_agent >= self.agents.len() {
+            self.selected_agent = self.agents.len().saturating_sub(1);
+        }
+    }
+
+    pub fn select_next_agent(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+        self.selected_agent = (self.selected_agent + 1) % self.agents.len();
+    }
+
+    pub fn select_prev_agent(&mut self) {
+        if self.agents.is_empty() {
+            return;
+        }
+        self.selected_agent = (self.selected_agent + self.agents.len() - 1) % self.agents.len();
+    }
+
+    pub fn selected_agent_ref(&self) -> Option<&AgentPresence> {
+        self.agents.get(self.selected_agent)
     }
 }

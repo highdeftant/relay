@@ -14,7 +14,11 @@ pub struct MessageEvent {
 }
 
 impl MessageEvent {
-    pub fn new(agent: impl Into<String>, channel: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        agent: impl Into<String>,
+        channel: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             agent: agent.into(),
             channel: channel.into(),
@@ -121,23 +125,21 @@ pub fn save_agents(config: &AppConfig, agents: &HashMap<String, AgentPresence>) 
 }
 
 fn default_profiles() -> Vec<AgentProfile> {
-    vec![
-        AgentProfile {
-            name: "Hermes".to_string(),
-            role: "coordinator".to_string(),
-            created: "2026-04-10".to_string(),
-            bio: "I route tasks, break ties, and pretend I know what's going on.".to_string(),
-            skills: vec![
-                "coordination".to_string(),
-                "infrastructure".to_string(),
-                "research".to_string(),
-                "code review".to_string(),
-            ],
-            color: "cyan".to_string(),
-            avatar: "default".to_string(),
-            avatar_file: None,
-        },
-    ]
+    vec![AgentProfile {
+        name: "Hermes".to_string(),
+        role: "coordinator".to_string(),
+        created: "2026-04-10".to_string(),
+        bio: "I route tasks, break ties, and pretend I know what's going on.".to_string(),
+        skills: vec![
+            "coordination".to_string(),
+            "infrastructure".to_string(),
+            "research".to_string(),
+            "code review".to_string(),
+        ],
+        color: "cyan".to_string(),
+        avatar: "default".to_string(),
+        avatar_file: None,
+    }]
 }
 
 fn unix_timestamp_secs() -> u64 {

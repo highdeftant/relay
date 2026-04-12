@@ -1,32 +1,45 @@
 //! TUI dashboard — Ratatui + crossterm event loop.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    DefaultTerminal, Frame,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Tabs},
-    DefaultTerminal, Frame,
 };
 
-use crate::{app::{AppState, Tab}, config::AppConfig};
+use crate::{
+    app::{AppState, Tab},
+    avatar,
+    config::AppConfig,
+    storage,
+};
+
+const COLOR_VOID: Color = Color::Rgb(10, 10, 15);
+const COLOR_STEEL: Color = Color::Rgb(42, 42, 53);
+const COLOR_GHOST: Color = Color::Rgb(232, 232, 240);
+const COLOR_GREEN: Color = Color::Rgb(0, 255, 65);
+const COLOR_CYAN: Color = Color::Rgb(0, 229, 255);
+const COLOR_AMBER: Color = Color::Rgb(255, 208, 64);
+const COLOR_ORANGE: Color = Color::Rgb(255, 107, 0);
+const COLOR_RED: Color = Color::Rgb(255, 0, 51);
 
 /// Entry point for `relay watch`.
-pub async fn watch(_config: AppConfig) -> Result<()> {
+pub async fn watch(config: AppConfig) -> Result<()> {
     enable_raw_mode()?;
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnterAlternateScreen)?;
 
-    let result = run_dashboard(&mut terminal).await;
+    let result = run_dashboard(&mut terminal, config).await;
 
-    // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     ratatui::restore();
@@ -34,19 +47,27 @@ pub async fn watch(_config: AppConfig) -> Result<()> {
     result
 }
 
-async fn run_dashboard(terminal: &mut DefaultTerminal) -> Result<()> {
+async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Result<()> {
     let mut state = AppState::new();
+    refresh_state(&config, &mut state);
+
+    let mut last_refresh = Instant::now();
 
     loop {
         terminal.draw(|frame| draw(frame, &state))?;
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                handle_key(&mut state, key.code);
+        if last_refresh.elapsed() >= Duration::from_secs(1) {
+            refresh_state(&config, &mut state);
+            last_refresh = Instant::now();
+        }
+
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
+            handle_key(&mut state, key.code);
         }
 
         if state.should_quit {
@@ -55,6 +76,24 @@ async fn run_dashboard(terminal: &mut DefaultTerminal) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn refresh_state(config: &AppConfig, state: &mut AppState) {
+    match storage::load_agents(config) {
+        Ok(map) => {
+            let mut rows = map.into_values().collect::<Vec<_>>();
+            rows.sort_by(|a, b| a.name.cmp(&b.name));
+            state.agents = rows;
+            state.clamp_selection();
+        }
+        Err(error) => {
+            state.logs.push(format!("load_agents failed: {error}"));
+            if state.logs.len() > 200 {
+                let keep_from = state.logs.len().saturating_sub(200);
+                state.logs.drain(0..keep_from);
+            }
+        }
+    }
 }
 
 fn handle_key(state: &mut AppState, code: KeyCode) {
@@ -66,6 +105,16 @@ fn handle_key(state: &mut AppState, code: KeyCode) {
         KeyCode::Char('2') => state.active_tab = Tab::Agents,
         KeyCode::Char('3') => state.active_tab = Tab::Files,
         KeyCode::Char('4') => state.active_tab = Tab::Logs,
+        KeyCode::Down | KeyCode::Char('j') => {
+            if state.active_tab == Tab::Agents {
+                state.select_next_agent();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if state.active_tab == Tab::Agents {
+                state.select_prev_agent();
+            }
+        }
         _ => {}
     }
 }
@@ -74,49 +123,48 @@ fn draw(frame: &mut Frame<'_>, state: &AppState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // title bar
-            Constraint::Length(3), // tab bar
-            Constraint::Min(1),   // content
-            Constraint::Length(1), // status bar
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
-    draw_title(frame, outer[0]);
+    draw_title(frame, outer[0], state);
     draw_tabs(frame, outer[1], state.active_tab);
     draw_content(frame, outer[2], state);
     draw_status(frame, outer[3], state);
 }
 
-/// Title bar: 同期//SYNC — agent count, uptime
-fn draw_title(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+fn draw_title(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             " 同期//SYNC ",
             Style::default()
-                .fg(Color::Rgb(0, 255, 65)) // terminal green
+                .fg(COLOR_GREEN)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("RELAY v0.1", Style::default().fg(Color::Rgb(232, 232, 240))), // ghost white
-        Span::styled("  ──  ", Style::default().fg(Color::Rgb(42, 42, 53))), // rust steel
-        Span::styled("AGENTS: ", Style::default().fg(Color::Rgb(232, 232, 240))),
+        Span::styled("RELAY v0.1", Style::default().fg(COLOR_GHOST)),
+        Span::styled("  ──  ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("AGENTS: ", Style::default().fg(COLOR_GHOST)),
         Span::styled(
-            format!("{:02}", state_agent_count_placeholder()),
-            Style::default().fg(Color::Rgb(0, 255, 65)),
+            format!("{:02}", state.agents.len()),
+            Style::default().fg(COLOR_GREEN),
         ),
-        Span::styled("  |  STATUS: ", Style::default().fg(Color::Rgb(232, 232, 240))),
-        Span::styled("ONLINE", Style::default().fg(Color::Rgb(0, 255, 65))),
+        Span::styled("  |  ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("TAB: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(state.active_tab.label(), Style::default().fg(COLOR_AMBER)),
     ]))
     .block(
         Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::Rgb(42, 42, 53))),
+            .border_style(Style::default().fg(COLOR_STEEL)),
     );
 
     frame.render_widget(title, area);
 }
 
-/// Tab bar with active indicator
-fn draw_tabs(frame: &mut Frame<'_>, area: ratatui::layout::Rect, active: Tab) {
+fn draw_tabs(frame: &mut Frame<'_>, area: Rect, active: Tab) {
     let titles: Vec<Line<'_>> = Tab::ALL
         .iter()
         .map(|t| {
@@ -124,10 +172,10 @@ fn draw_tabs(frame: &mut Frame<'_>, area: ratatui::layout::Rect, active: Tab) {
             let prefix = if is_active { "> " } else { "  " };
             let style = if is_active {
                 Style::default()
-                    .fg(Color::Rgb(0, 255, 65)) // terminal green
+                    .fg(COLOR_GREEN)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(232, 232, 240)) // ghost white dimmed
+                Style::default().fg(COLOR_GHOST)
             };
             Line::from(vec![Span::styled(format!("{prefix}{}", t.label()), style)])
         })
@@ -137,146 +185,242 @@ fn draw_tabs(frame: &mut Frame<'_>, area: ratatui::layout::Rect, active: Tab) {
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::Rgb(0, 229, 255))), // phantom cyan
+                .border_style(Style::default().fg(COLOR_CYAN)),
         )
-        .style(Style::default().bg(Color::Rgb(10, 10, 15))) // void black
-        .divider(Span::styled(
-            "  │  ",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        ));
+        .style(Style::default().bg(COLOR_VOID))
+        .divider(Span::styled("  │  ", Style::default().fg(COLOR_STEEL)));
 
     frame.render_widget(tabs, area);
 }
 
-/// Main content area — switches based on active tab
-fn draw_content(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
+fn draw_content(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     match state.active_tab {
-        Tab::Chat => draw_chat_placeholder(frame, area),
-        Tab::Agents => draw_agents_placeholder(frame, area),
-        Tab::Files => draw_files_placeholder(frame, area),
-        Tab::Logs => draw_logs_placeholder(frame, area),
+        Tab::Chat => draw_placeholder(frame, area, " #general ", "[chat feed coming next]"),
+        Tab::Agents => draw_agents_panel(frame, area, state),
+        Tab::Files => draw_placeholder(frame, area, " ファイル//FILES ", "[files tab in progress]"),
+        Tab::Logs => draw_placeholder(frame, area, " ログ//LOGS ", "[logs tab in progress]"),
     }
 }
 
-fn draw_chat_placeholder(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-    let content = Paragraph::new(vec![
+fn draw_placeholder(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str) {
+    let widget = Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled(
-            "  Channel: #general",
-            Style::default().fg(Color::Rgb(0, 229, 255)), // phantom cyan
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [channel messages will appear here]",
-            Style::default().fg(Color::Rgb(42, 42, 53)), // rust steel
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  > _",
-            Style::default().fg(Color::Rgb(232, 232, 240)),
+            format!("  {body}"),
+            Style::default().fg(COLOR_STEEL),
         )),
     ])
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(0, 229, 255)))
+            .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
-                " #general ",
-                Style::default().fg(Color::Rgb(0, 229, 255)),
+                title.to_string(),
+                Style::default().fg(COLOR_CYAN),
             )),
     );
 
-    frame.render_widget(content, area);
+    frame.render_widget(widget, area);
 }
 
-fn draw_agents_placeholder(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-    let content = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [agent list + avatars will render here]",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Press Enter on an agent to view profile",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        )),
-    ])
-    .block(
+fn draw_agents_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(area);
+
+    draw_agents_list(frame, split[0], state);
+    draw_agent_detail(frame, split[1], state);
+}
+
+fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![Line::from("")];
+
+    if state.agents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no agents connected",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    } else {
+        for (idx, agent) in state.agents.iter().enumerate() {
+            let selected = idx == state.selected_agent;
+            let dot = if agent.status == "offline" {
+                "○"
+            } else {
+                "●"
+            };
+            let status_color = status_color(&agent.status);
+            let role = agent.role.as_deref().unwrap_or("-");
+            let task = agent.task.as_deref().unwrap_or("");
+            let marker = if selected { ">" } else { " " };
+
+            let mut text = format!(
+                " {marker} {dot} {:<10} [{:<10}] {:<8}",
+                agent.name, role, agent.status
+            );
+            if !task.is_empty() {
+                text.push_str(" :: ");
+                text.push_str(task);
+            }
+
+            let style = if selected {
+                Style::default()
+                    .fg(COLOR_GREEN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(COLOR_GHOST)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {marker} "), style),
+                Span::styled(format!("{dot} "), Style::default().fg(status_color)),
+                Span::styled(
+                    format!("{:<10} [{:<10}] {:<8}", agent.name, role, agent.status),
+                    style,
+                ),
+                Span::styled(
+                    if task.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" :: {}", truncate(task, 20))
+                    },
+                    Style::default().fg(COLOR_STEEL),
+                ),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    let online = state
+        .agents
+        .iter()
+        .filter(|a| a.status != "offline")
+        .count();
+    let offline = state.agents.len().saturating_sub(online);
+    let working = state
+        .agents
+        .iter()
+        .filter(|a| a.status == "working")
+        .count();
+
+    lines.push(Line::from(vec![
+        Span::styled(" AGENTS: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            format!("{:02}", state.agents.len()),
+            Style::default().fg(COLOR_GREEN),
+        ),
+        Span::styled(" | ONLINE: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{:02}", online), Style::default().fg(COLOR_GREEN)),
+        Span::styled(" | OFFLINE: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{:02}", offline), Style::default().fg(COLOR_STEEL)),
+        Span::styled(" | WORKING: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{:02}", working), Style::default().fg(COLOR_AMBER)),
+    ]));
+
+    let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(0, 229, 255)))
+            .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
                 " 接続//AGENTS ",
-                Style::default().fg(Color::Rgb(0, 229, 255)),
+                Style::default().fg(COLOR_CYAN),
             )),
     );
 
-    frame.render_widget(content, area);
+    frame.render_widget(widget, area);
 }
 
-fn draw_files_placeholder(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-    let content = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [file transfers will appear here]",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        )),
-    ])
-    .block(
+fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![Line::from("")];
+
+    if let Some(agent) = state.selected_agent_ref() {
+        let avatar = avatar::generate(&agent.name, None);
+        lines.push(Line::from(Span::styled(
+            format!("  {}", agent.name.to_uppercase()),
+            Style::default()
+                .fg(status_color(&agent.status))
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  role: {}", agent.role.as_deref().unwrap_or("-")),
+            Style::default().fg(COLOR_GHOST),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  status: {}", agent.status),
+            Style::default().fg(status_color(&agent.status)),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  last_seen_epoch: {}", agent.last_seen_epoch),
+            Style::default().fg(COLOR_STEEL),
+        )));
+        if let Some(task) = &agent.task {
+            lines.push(Line::from(Span::styled(
+                format!("  task: {}", truncate(task, 26)),
+                Style::default().fg(COLOR_AMBER),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  avatar",
+            Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+        )));
+        for row in &avatar.lines {
+            lines.push(Line::from(Span::styled(
+                format!("  {row}"),
+                Style::default().fg(status_color(&agent.status)),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  select an agent",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    }
+
+    let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(0, 229, 255)))
-            .title(Span::styled(
-                " ファイル//FILES ",
-                Style::default().fg(Color::Rgb(0, 229, 255)),
-            )),
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(" PROFILE ", Style::default().fg(COLOR_CYAN))),
     );
 
-    frame.render_widget(content, area);
+    frame.render_widget(widget, area);
 }
 
-fn draw_logs_placeholder(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-    let content = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  [server events and agent activity will appear here]",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(0, 229, 255)))
-            .title(Span::styled(
-                " ログ//LOGS ",
-                Style::default().fg(Color::Rgb(0, 229, 255)),
-            )),
-    );
-
-    frame.render_widget(content, area);
-}
-
-/// Status bar at the bottom
-fn draw_status(frame: &mut Frame<'_>, area: ratatui::layout::Rect, state: &AppState) {
+fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let status = Paragraph::new(Line::from(vec![
+        Span::styled(" [Tab] Switch ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("[1-4] Tabs ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("[j/k] Select Agent ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("[q] Quit ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("│", Style::default().fg(COLOR_STEEL)),
         Span::styled(
-            " [Tab] Switch  [1-4] Tab  [q] Quit ",
-            Style::default().fg(Color::Rgb(42, 42, 53)),
-        ),
-        Span::styled("│", Style::default().fg(Color::Rgb(42, 42, 53))),
-        Span::styled(
-            format!(" Tab: {} ", state.active_tab.label()),
-            Style::default().fg(Color::Rgb(255, 176, 0)), // data amber
+            format!(" {} ", state.active_tab.label()),
+            Style::default().fg(COLOR_ORANGE),
         ),
     ]));
 
     frame.render_widget(status, area);
 }
 
-/// Placeholder until we wire up real agent count.
-fn state_agent_count_placeholder() -> usize {
-    0
+fn status_color(status: &str) -> Color {
+    match status {
+        "working" => COLOR_AMBER,
+        "offline" => COLOR_RED,
+        _ => COLOR_GREEN,
+    }
+}
+
+fn truncate(input: &str, max: usize) -> String {
+    if input.len() <= max {
+        return input.to_string();
+    }
+    let mut out = input
+        .chars()
+        .take(max.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
 }

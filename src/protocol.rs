@@ -37,7 +37,12 @@ pub enum ServerResponse {
     Pong,
 }
 
-pub async fn send_message(config: AppConfig, agent: String, channel: String, message: String) -> Result<()> {
+pub async fn send_message(
+    config: AppConfig,
+    agent: String,
+    channel: String,
+    message: String,
+) -> Result<()> {
     let response = send_request(
         &config,
         &ClientRequest::Send {

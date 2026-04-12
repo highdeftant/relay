@@ -149,9 +149,9 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
         ClientRequest::Join { agent, role } => {
             let mut agents = state.agents.write().await;
             let status = "online".to_string();
-            let entry = agents
-                .entry(agent.clone())
-                .or_insert_with(|| AgentPresence::new(agent.clone(), role.clone(), status.clone(), None));
+            let entry = agents.entry(agent.clone()).or_insert_with(|| {
+                AgentPresence::new(agent.clone(), role.clone(), status.clone(), None)
+            });
             entry.role = role;
             entry.heartbeat(Some(status), None);
 
