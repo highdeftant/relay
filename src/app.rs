@@ -9,10 +9,19 @@ pub enum Tab {
     Agents,
     Files,
     Logs,
+    Activity,
+    System,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Chat, Tab::Agents, Tab::Files, Tab::Logs];
+    pub const ALL: [Tab; 6] = [
+        Tab::Chat,
+        Tab::Agents,
+        Tab::Files,
+        Tab::Logs,
+        Tab::Activity,
+        Tab::System,
+    ];
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -20,6 +29,8 @@ impl Tab {
             Tab::Agents => "AGENTS",
             Tab::Files => "FILES",
             Tab::Logs => "LOGS",
+            Tab::Activity => "ACTIVITY",
+            Tab::System => "SYSTEM",
         }
     }
 
@@ -29,6 +40,8 @@ impl Tab {
             Tab::Agents => 1,
             Tab::Files => 2,
             Tab::Logs => 3,
+            Tab::Activity => 4,
+            Tab::System => 5,
         }
     }
 
@@ -38,16 +51,18 @@ impl Tab {
             1 => Tab::Agents,
             2 => Tab::Files,
             3 => Tab::Logs,
+            4 => Tab::Activity,
+            5 => Tab::System,
             _ => Tab::Chat,
         }
     }
 
     pub fn next(self) -> Tab {
-        Tab::from_index((self.index() + 1) % 4)
+        Tab::from_index((self.index() + 1) % 6)
     }
 
     pub fn prev(self) -> Tab {
-        Tab::from_index((self.index() + 3) % 4)
+        Tab::from_index((self.index() + 5) % 6)
     }
 }
 

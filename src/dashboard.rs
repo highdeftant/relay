@@ -23,14 +23,14 @@ use crate::{
     protocol, storage,
 };
 
-// Muted terminal theme (less neon, better readability)
-const COLOR_VOID: Color = Color::Rgb(11, 15, 20);
-const COLOR_STEEL: Color = Color::Rgb(44, 52, 64);
-const COLOR_GHOST: Color = Color::Rgb(199, 208, 220);
-const COLOR_GREEN: Color = Color::Rgb(110, 231, 168);
-const COLOR_CYAN: Color = Color::Rgb(125, 211, 252);
-const COLOR_AMBER: Color = Color::Rgb(251, 191, 36);
-const COLOR_ORANGE: Color = Color::Rgb(245, 158, 11);
+// Muted, lighter dark theme (no pure black)
+const COLOR_VOID: Color = Color::Rgb(24, 28, 34);
+const COLOR_STEEL: Color = Color::Rgb(72, 82, 96);
+const COLOR_GHOST: Color = Color::Rgb(214, 221, 230);
+const COLOR_GREEN: Color = Color::Rgb(134, 239, 172);
+const COLOR_CYAN: Color = Color::Rgb(147, 197, 253);
+const COLOR_AMBER: Color = Color::Rgb(252, 211, 77);
+const COLOR_ORANGE: Color = Color::Rgb(251, 146, 60);
 const COLOR_RED: Color = Color::Rgb(248, 113, 113);
 
 enum UiAction {
@@ -173,6 +173,14 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             state.active_tab = Tab::Logs;
             return None;
         }
+        KeyCode::Char('5') => {
+            state.active_tab = Tab::Activity;
+            return None;
+        }
+        KeyCode::Char('6') => {
+            state.active_tab = Tab::System;
+            return None;
+        }
         _ => {}
     }
 
@@ -197,7 +205,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             }
             _ => {}
         },
-        Tab::Files | Tab::Logs => {}
+        Tab::Files | Tab::Logs | Tab::Activity | Tab::System => {}
     }
 
     None
@@ -286,6 +294,8 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Tab::Agents => draw_agents_panel(frame, area, state),
         Tab::Files => draw_placeholder(frame, area, " ファイル//FILES ", "[files tab in progress]"),
         Tab::Logs => draw_logs_panel(frame, area, state),
+        Tab::Activity => draw_activity_panel(frame, area, state),
+        Tab::System => draw_system_panel(frame, area, state),
     }
 }
 
@@ -375,6 +385,129 @@ fn draw_logs_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
                 " ログ//LOGS ",
+                Style::default().fg(COLOR_CYAN),
+            )),
+    );
+
+    frame.render_widget(widget, area);
+}
+
+fn draw_activity_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let mut lines = vec![Line::from("")];
+    let cap = area.height.saturating_sub(4) as usize;
+
+    let msg_count = cap.min(state.messages.len());
+    let log_count = cap.saturating_sub(msg_count).min(state.logs.len());
+
+    if msg_count == 0 && log_count == 0 {
+        lines.push(Line::from(Span::styled(
+            "  no recent activity",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    }
+
+    for msg in state.messages.iter().rev().take(msg_count).rev() {
+        lines.push(Line::from(vec![
+            Span::styled("  MSG ", Style::default().fg(COLOR_AMBER)),
+            Span::styled(format!("{}", msg.agent), Style::default().fg(COLOR_CYAN)),
+            Span::styled(": ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(truncate(&msg.message, 72), Style::default().fg(COLOR_GHOST)),
+        ]));
+    }
+
+    for log in state.logs.iter().rev().take(log_count).rev() {
+        lines.push(Line::from(vec![
+            Span::styled("  LOG ", Style::default().fg(COLOR_RED)),
+            Span::styled(truncate(log, 82), Style::default().fg(COLOR_STEEL)),
+        ]));
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(
+                " ACTIVITY//FEED ",
+                Style::default().fg(COLOR_CYAN),
+            )),
+    );
+
+    frame.render_widget(widget, area);
+}
+
+fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+    let online = state
+        .agents
+        .iter()
+        .filter(|a| a.status != "offline")
+        .count();
+    let working = state
+        .agents
+        .iter()
+        .filter(|a| a.status == "working")
+        .count();
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Build: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled("relay v0.1", Style::default().fg(COLOR_AMBER)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tabs: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                "CHAT AGENTS FILES LOGS ACTIVITY SYSTEM",
+                Style::default().fg(COLOR_CYAN),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Agents total: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                format!("{}", state.agents.len()),
+                Style::default().fg(COLOR_GREEN),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Online: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", online), Style::default().fg(COLOR_GREEN)),
+            Span::styled("  Working: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", working), Style::default().fg(COLOR_AMBER)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Active channel: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                format!("#{}", state.active_channel),
+                Style::default().fg(COLOR_CYAN),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Messages loaded: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                format!("{}", state.messages.len()),
+                Style::default().fg(COLOR_CYAN),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Logs buffered: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                format!("{}", state.logs.len()),
+                Style::default().fg(COLOR_STEEL),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  next: channel switching + skills/memory panes",
+            Style::default().fg(COLOR_STEEL),
+        )),
+    ];
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(
+                " SYSTEM//STATUS ",
                 Style::default().fg(COLOR_CYAN),
             )),
     );
@@ -569,7 +702,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" [Tab] Switch ", Style::default().fg(COLOR_STEEL)),
-        Span::styled("[1-4] Tabs ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("[1-6] Tabs ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[j/k] Select Agent ", Style::default().fg(COLOR_STEEL)),
         Span::styled(chat_hint, Style::default().fg(COLOR_STEEL)),
         Span::styled("[q] Quit ", Style::default().fg(COLOR_STEEL)),
