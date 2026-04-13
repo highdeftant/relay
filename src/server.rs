@@ -33,7 +33,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
     };
 
     let unix_listener = UnixListener::bind(&config.socket_path)?;
-    let tcp_listener = TcpListener::bind(("0.0.0.0", config.tcp_port)).await?;
+    let tcp_listener = TcpListener::bind(("127.0.0.1", config.tcp_port)).await?;
 
     tracing::info!(
         unix_socket = %config.socket_path.display(),
@@ -199,6 +199,21 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             ServerResponse::Agents { agents: rows }
         }
         ClientRequest::Ping => ServerResponse::Pong,
+        ClientRequest::List { channel, limit } => {
+            let max = limit.unwrap_or(50);
+            match crate::storage::load_channel_events(&state.config, &channel, max) {
+                Ok(events) => ServerResponse::Messages { channel, events },
+                Err(error) => ServerResponse::Error {
+                    message: format!("list failed: {error}"),
+                },
+            }
+        }
+        ClientRequest::Channels => match crate::storage::list_channels(&state.config) {
+            Ok(channels) => ServerResponse::ChannelList { channels },
+            Err(error) => ServerResponse::Error {
+                message: format!("channels failed: {error}"),
+            },
+        },
     }
 }
 
