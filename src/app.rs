@@ -10,18 +10,16 @@ use crate::{
 pub enum Tab {
     Chat,
     Agents,
-    Skills,
-    Sessions,
+    Knowledge,
     Memory,
     System,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 5] = [
         Tab::Chat,
         Tab::Agents,
-        Tab::Skills,
-        Tab::Sessions,
+        Tab::Knowledge,
         Tab::Memory,
         Tab::System,
     ];
@@ -30,8 +28,7 @@ impl Tab {
         match self {
             Tab::Chat => "CHAT",
             Tab::Agents => "AGENTS",
-            Tab::Skills => "SKILLS",
-            Tab::Sessions => "SESSIONS",
+            Tab::Knowledge => "KNOWLEDGE",
             Tab::Memory => "MEMORY",
             Tab::System => "SYSTEM",
         }
@@ -41,10 +38,9 @@ impl Tab {
         match self {
             Tab::Chat => 0,
             Tab::Agents => 1,
-            Tab::Skills => 2,
-            Tab::Sessions => 3,
-            Tab::Memory => 4,
-            Tab::System => 5,
+            Tab::Knowledge => 2,
+            Tab::Memory => 3,
+            Tab::System => 4,
         }
     }
 
@@ -52,20 +48,19 @@ impl Tab {
         match i {
             0 => Tab::Chat,
             1 => Tab::Agents,
-            2 => Tab::Skills,
-            3 => Tab::Sessions,
-            4 => Tab::Memory,
-            5 => Tab::System,
+            2 => Tab::Knowledge,
+            3 => Tab::Memory,
+            4 => Tab::System,
             _ => Tab::Chat,
         }
     }
 
     pub fn next(self) -> Tab {
-        Tab::from_index((self.index() + 1) % 6)
+        Tab::from_index((self.index() + 1) % 5)
     }
 
     pub fn prev(self) -> Tab {
-        Tab::from_index((self.index() + 5) % 6)
+        Tab::from_index((self.index() + 4) % 5)
     }
 }
 
@@ -83,6 +78,7 @@ pub struct AppState {
     pub logs: Vec<String>,
     pub hermes_snapshot: HermesSnapshot,
     pub should_quit: bool,
+    pub last_refresh_unix: u64,
 }
 
 impl AppState {
@@ -99,6 +95,7 @@ impl AppState {
             logs: Vec::new(),
             hermes_snapshot: HermesSnapshot::default(),
             should_quit: false,
+            last_refresh_unix: 0,
         }
     }
 

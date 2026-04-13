@@ -1,6 +1,6 @@
 //! TUI dashboard — Ratatui + crossterm event loop.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use crossterm::{
@@ -33,6 +33,25 @@ const COLOR_CYAN: Color = Color::Rgb(147, 197, 253);
 const COLOR_AMBER: Color = Color::Rgb(252, 211, 77);
 const COLOR_ORANGE: Color = Color::Rgb(251, 146, 60);
 const COLOR_RED: Color = Color::Rgb(248, 113, 113);
+
+const AGENT_STALE_SECS: u64 = 90;
+const AGENT_OFFLINE_SECS: u64 = 300;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentHealth {
+    Working,
+    Online,
+    Stale,
+    Offline,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct HealthCounts {
+    working: usize,
+    online: usize,
+    stale: usize,
+    offline: usize,
+}
 
 enum UiAction {
     SendChatMessage,
@@ -126,10 +145,12 @@ async fn run_dashboard(terminal: &mut DefaultTerminal, config: AppConfig) -> Res
 fn refresh_state(config: &AppConfig, state: &mut AppState) {
     state.hermes_snapshot = hermes::load_snapshot();
 
+    state.last_refresh_unix = now_unix_secs();
+
     match storage::load_agents(config) {
         Ok(map) => {
             let mut rows = map.into_values().collect::<Vec<_>>();
-            rows.sort_by(|a, b| a.name.cmp(&b.name));
+            sort_agents_by_health(&mut rows);
             state.agents = rows;
             state.clamp_selection();
         }
@@ -184,18 +205,14 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             return None;
         }
         KeyCode::Char('3') => {
-            state.active_tab = Tab::Skills;
+            state.active_tab = Tab::Knowledge;
             return None;
         }
         KeyCode::Char('4') => {
-            state.active_tab = Tab::Sessions;
-            return None;
-        }
-        KeyCode::Char('5') => {
             state.active_tab = Tab::Memory;
             return None;
         }
-        KeyCode::Char('6') => {
+        KeyCode::Char('5') => {
             state.active_tab = Tab::System;
             return None;
         }
@@ -226,7 +243,7 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
             }
             _ => {}
         },
-        Tab::Skills | Tab::Sessions | Tab::Memory | Tab::System => {}
+        Tab::Knowledge | Tab::Memory | Tab::System => {}
     }
 
     None
@@ -250,7 +267,9 @@ fn draw(frame: &mut Frame<'_>, state: &AppState) {
 }
 
 fn draw_title(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let title = Paragraph::new(Line::from(vec![
+    let counts = health_counts(&state.agents);
+
+    let mut spans = vec![
         Span::styled(
             " 同期//SYNC ",
             Style::default()
@@ -259,19 +278,56 @@ fn draw_title(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ),
         Span::styled("RELAY v0.1", Style::default().fg(COLOR_GHOST)),
         Span::styled("  ──  ", Style::default().fg(COLOR_STEEL)),
-        Span::styled("AGENTS: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(
-            format!("{:02}", state.agents.len()),
+    ];
+
+    // Health-first: always show agent counts
+    spans.push(Span::styled("AGENTS: ", Style::default().fg(COLOR_GHOST)));
+    spans.push(Span::styled(
+        format!("{:02}", state.agents.len()),
+        Style::default().fg(COLOR_GREEN),
+    ));
+
+    if counts.online > 0 {
+        spans.push(Span::styled("  ", Style::default().fg(COLOR_STEEL)));
+        spans.push(Span::styled("●", Style::default().fg(COLOR_GREEN)));
+        spans.push(Span::styled(
+            format!("{}", counts.online),
             Style::default().fg(COLOR_GREEN),
-        ),
-        Span::styled("  |  ", Style::default().fg(COLOR_STEEL)),
-        Span::styled("CH: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(
-            format!("#{}", state.active_channel),
+        ));
+    }
+    if counts.working > 0 {
+        spans.push(Span::styled("  ", Style::default().fg(COLOR_STEEL)));
+        spans.push(Span::styled("◆", Style::default().fg(COLOR_AMBER)));
+        spans.push(Span::styled(
+            format!("{}", counts.working),
             Style::default().fg(COLOR_AMBER),
-        ),
-    ]))
-    .block(
+        ));
+    }
+    if counts.stale > 0 {
+        spans.push(Span::styled("  ", Style::default().fg(COLOR_STEEL)));
+        spans.push(Span::styled("◐", Style::default().fg(COLOR_ORANGE)));
+        spans.push(Span::styled(
+            format!("{}", counts.stale),
+            Style::default().fg(COLOR_ORANGE),
+        ));
+    }
+    if counts.offline > 0 {
+        spans.push(Span::styled("  ", Style::default().fg(COLOR_STEEL)));
+        spans.push(Span::styled("○", Style::default().fg(COLOR_RED)));
+        spans.push(Span::styled(
+            format!("{}", counts.offline),
+            Style::default().fg(COLOR_RED),
+        ));
+    }
+
+    spans.push(Span::styled("  |  ", Style::default().fg(COLOR_STEEL)));
+    spans.push(Span::styled("CH: ", Style::default().fg(COLOR_GHOST)));
+    spans.push(Span::styled(
+        format!("#{}", state.active_channel),
+        Style::default().fg(COLOR_AMBER),
+    ));
+
+    let title = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::BOTTOM)
             .border_style(Style::default().fg(COLOR_STEEL)),
@@ -313,8 +369,7 @@ fn draw_content(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     match state.active_tab {
         Tab::Chat => draw_chat_panel(frame, area, state),
         Tab::Agents => draw_agents_panel(frame, area, state),
-        Tab::Skills => draw_skills_panel(frame, area, state),
-        Tab::Sessions => draw_sessions_panel(frame, area, state),
+        Tab::Knowledge => draw_knowledge_panel(frame, area, state),
         Tab::Memory => draw_memory_panel(frame, area, state),
         Tab::System => draw_system_panel(frame, area, state),
     }
@@ -394,30 +449,20 @@ fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(input, split[1]);
 }
 
-fn draw_skills_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
+fn draw_knowledge_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from("")];
     let snapshot = &state.hermes_snapshot;
 
     lines.push(Line::from(vec![
-        Span::styled("  Hermes skills detected: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled("  Hermes skills: ", Style::default().fg(COLOR_GHOST)),
         Span::styled(format!("{}", snapshot.skill_count), Style::default().fg(COLOR_GREEN)),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("  Skills root: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(
-            if snapshot.skills_root_exists { "present" } else { "missing" },
-            Style::default().fg(if snapshot.skills_root_exists {
-                COLOR_GREEN
-            } else {
-                COLOR_RED
-            }),
-        ),
+        Span::styled("   Sessions: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{}", snapshot.session_count), Style::default().fg(COLOR_GREEN)),
     ]));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  categories",
+        "  skill categories",
         Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
     )));
 
@@ -427,7 +472,7 @@ fn draw_skills_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_STEEL),
         )));
     } else {
-        for category in snapshot.skill_categories.iter().take(16) {
+        for category in snapshot.skill_categories.iter().take(8) {
             lines.push(Line::from(vec![
                 Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
                 Span::styled(category.clone(), Style::default().fg(COLOR_GHOST)),
@@ -435,27 +480,9 @@ fn draw_skills_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         }
     }
 
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(" HERMES//SKILLS ", Style::default().fg(COLOR_CYAN))),
-    );
-
-    frame.render_widget(widget, area);
-}
-
-fn draw_sessions_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let mut lines = vec![Line::from("")];
-    let snapshot = &state.hermes_snapshot;
-
-    lines.push(Line::from(vec![
-        Span::styled("  Session files: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{}", snapshot.session_count), Style::default().fg(COLOR_GREEN)),
-    ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  recent",
+        "  recent sessions",
         Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
     )));
 
@@ -465,7 +492,7 @@ fn draw_sessions_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_STEEL),
         )));
     } else {
-        for session in &snapshot.recent_sessions {
+        for session in snapshot.recent_sessions.iter().take(8) {
             lines.push(Line::from(vec![
                 Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
                 Span::styled(truncate(session, 72), Style::default().fg(COLOR_GHOST)),
@@ -477,7 +504,7 @@ fn draw_sessions_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(" HERMES//SESSIONS ", Style::default().fg(COLOR_CYAN))),
+            .title(Span::styled(" HERMES//KNOWLEDGE ", Style::default().fg(COLOR_CYAN))),
     );
 
     frame.render_widget(widget, area);
@@ -547,16 +574,13 @@ fn draw_memory_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let online = state
-        .agents
-        .iter()
-        .filter(|a| a.status != "offline")
-        .count();
-    let working = state
-        .agents
-        .iter()
-        .filter(|a| a.status == "working")
-        .count();
+    let counts = health_counts(&state.agents);
+
+    let refresh_age = if state.last_refresh_unix > 0 {
+        human_age_short(state.last_refresh_unix)
+    } else {
+        "-".to_string()
+    };
 
     let lines = vec![
         Line::from(""),
@@ -565,11 +589,9 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Span::styled("relay v0.1", Style::default().fg(COLOR_AMBER)),
         ]),
         Line::from(vec![
-            Span::styled("  Tabs: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(
-                "CHAT AGENTS SKILLS SESSIONS MEMORY SYSTEM",
-                Style::default().fg(COLOR_CYAN),
-            ),
+            Span::styled("  Data refresh: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{refresh_age} ago"), Style::default().fg(COLOR_GREEN)),
+            Span::styled(format!(" (every 900ms)"), Style::default().fg(COLOR_STEEL)),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -580,10 +602,28 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Online: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", online), Style::default().fg(COLOR_GREEN)),
-            Span::styled("  Working: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", working), Style::default().fg(COLOR_AMBER)),
+            Span::styled("  ● Online: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", counts.online), Style::default().fg(COLOR_GREEN)),
+            Span::styled("  ◆ Working: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", counts.working), Style::default().fg(COLOR_AMBER)),
+            Span::styled("  ◐ Stale: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", counts.stale), Style::default().fg(COLOR_ORANGE)),
+            Span::styled("  ○ Offline: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(format!("{}", counts.offline), Style::default().fg(COLOR_RED)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Attention: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled(
+                stale_offline_watchlist(&state.agents),
+                Style::default().fg(if counts.offline > 0 { COLOR_RED } else { COLOR_ORANGE }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Thresholds: ", Style::default().fg(COLOR_GHOST)),
+            Span::styled("stale=", Style::default().fg(COLOR_STEEL)),
+            Span::styled(format!("{AGENT_STALE_SECS}s"), Style::default().fg(COLOR_ORANGE)),
+            Span::styled("  offline=", Style::default().fg(COLOR_STEEL)),
+            Span::styled(format!("{AGENT_OFFLINE_SECS}s"), Style::default().fg(COLOR_RED)),
         ]),
         Line::from(vec![
             Span::styled("  Active channel: ", Style::default().fg(COLOR_GHOST)),
@@ -647,15 +687,18 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     } else {
         for (idx, agent) in state.agents.iter().enumerate() {
             let selected = idx == state.selected_agent;
-            let dot = if agent.status == "offline" {
-                "○"
-            } else {
-                "●"
+            let health = agent_health(&agent.status, agent.last_seen_epoch);
+            let dot = match health {
+                AgentHealth::Offline => "○",
+                AgentHealth::Stale => "◐",
+                AgentHealth::Working => "◆",
+                AgentHealth::Online => "●",
             };
-            let status_color = status_color(&agent.status);
+            let status_color = status_color(agent);
             let role = agent.role.as_deref().unwrap_or("-");
             let task = agent.task.as_deref().unwrap_or("");
             let marker = if selected { ">" } else { " " };
+            let age_tag = human_age_short(agent.last_seen_epoch);
             let skills = state
                 .hermes_snapshot
                 .profile_skill_counts
@@ -680,14 +723,20 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
                 Span::styled(format!(" {marker} "), style),
                 Span::styled(format!("{dot} "), Style::default().fg(status_color)),
                 Span::styled(
-                    format!("{:<10} [{:<10}] {:<8}{}", agent.name, role, agent.status, skills_tag),
+                    format!(
+                        "{:<10} [{:<10}] {:<8}{}",
+                        agent.name,
+                        role,
+                        health_label(health),
+                        skills_tag
+                    ),
                     style,
                 ),
                 Span::styled(
                     if task.is_empty() {
-                        String::new()
+                        format!("  ({age_tag})")
                     } else {
-                        format!(" :: {}", truncate(task, 20))
+                        format!(" :: {} ({age_tag})", truncate(task, 20))
                     },
                     Style::default().fg(COLOR_STEEL),
                 ),
@@ -697,17 +746,7 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     lines.push(Line::from(""));
 
-    let online = state
-        .agents
-        .iter()
-        .filter(|a| a.status != "offline")
-        .count();
-    let offline = state.agents.len().saturating_sub(online);
-    let working = state
-        .agents
-        .iter()
-        .filter(|a| a.status == "working")
-        .count();
+    let counts = health_counts(&state.agents);
 
     lines.push(Line::from(vec![
         Span::styled(" AGENTS: ", Style::default().fg(COLOR_GHOST)),
@@ -716,11 +755,13 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_GREEN),
         ),
         Span::styled(" | ONLINE: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", online), Style::default().fg(COLOR_GREEN)),
-        Span::styled(" | OFFLINE: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", offline), Style::default().fg(COLOR_STEEL)),
+        Span::styled(format!("{:02}", counts.online), Style::default().fg(COLOR_GREEN)),
         Span::styled(" | WORKING: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", working), Style::default().fg(COLOR_AMBER)),
+        Span::styled(format!("{:02}", counts.working), Style::default().fg(COLOR_AMBER)),
+        Span::styled(" | STALE: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{:02}", counts.stale), Style::default().fg(COLOR_ORANGE)),
+        Span::styled(" | OFFLINE: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(format!("{:02}", counts.offline), Style::default().fg(COLOR_RED)),
     ]));
 
     let widget = Paragraph::new(lines).block(
@@ -740,11 +781,12 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let mut lines = vec![Line::from("")];
 
     if let Some(agent) = state.selected_agent_ref() {
+        let health = agent_health(&agent.status, agent.last_seen_epoch);
         let avatar = avatar::generate(&agent.name, None);
         lines.push(Line::from(Span::styled(
             format!("  {}", agent.name.to_uppercase()),
             Style::default()
-                .fg(status_color(&agent.status))
+                .fg(status_color(agent))
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
@@ -752,8 +794,8 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_GHOST),
         )));
         lines.push(Line::from(Span::styled(
-            format!("  status: {}", agent.status),
-            Style::default().fg(status_color(&agent.status)),
+            format!("  health: {}", health_label(health)),
+            Style::default().fg(status_color(agent)),
         )));
         let profile_skills = state
             .hermes_snapshot
@@ -766,7 +808,7 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_CYAN),
         )));
         lines.push(Line::from(Span::styled(
-            format!("  last_seen_epoch: {}", agent.last_seen_epoch),
+            format!("  last seen: {} ago", human_age_long(agent.last_seen_epoch)),
             Style::default().fg(COLOR_STEEL),
         )));
         if let Some(task) = &agent.task {
@@ -784,7 +826,7 @@ fn draw_agent_detail(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         for row in &avatar.lines {
             lines.push(Line::from(Span::styled(
                 format!("  {row}"),
-                Style::default().fg(status_color(&agent.status)),
+                Style::default().fg(status_color(agent)),
             )));
         }
     } else {
@@ -819,7 +861,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" [Tab] Switch ", Style::default().fg(COLOR_STEEL)),
-        Span::styled("[1-6] Tabs ", Style::default().fg(COLOR_STEEL)),
+        Span::styled("[1-5] Tabs ", Style::default().fg(COLOR_STEEL)),
         Span::styled("[j/k] Select Agent ", Style::default().fg(COLOR_STEEL)),
         Span::styled(agent_hint, Style::default().fg(COLOR_STEEL)),
         Span::styled(chat_hint, Style::default().fg(COLOR_STEEL)),
@@ -834,12 +876,130 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     frame.render_widget(status, area);
 }
 
-fn status_color(status: &str) -> Color {
-    match status {
-        "working" => COLOR_AMBER,
-        "offline" => COLOR_RED,
-        _ => COLOR_GREEN,
+fn status_color(agent: &crate::storage::AgentPresence) -> Color {
+    match agent_health(&agent.status, agent.last_seen_epoch) {
+        AgentHealth::Offline => COLOR_RED,
+        AgentHealth::Stale => COLOR_ORANGE,
+        AgentHealth::Working => COLOR_AMBER,
+        AgentHealth::Online => COLOR_GREEN,
     }
+}
+
+fn health_label(health: AgentHealth) -> &'static str {
+    match health {
+        AgentHealth::Offline => "offline",
+        AgentHealth::Stale => "stale",
+        AgentHealth::Working => "working",
+        AgentHealth::Online => "online",
+    }
+}
+
+fn agent_health(status: &str, last_seen_epoch: u64) -> AgentHealth {
+    let age = now_unix_secs().saturating_sub(last_seen_epoch);
+    if status == "offline" || age >= AGENT_OFFLINE_SECS {
+        return AgentHealth::Offline;
+    }
+    if age >= AGENT_STALE_SECS {
+        return AgentHealth::Stale;
+    }
+    if status == "working" {
+        return AgentHealth::Working;
+    }
+    AgentHealth::Online
+}
+
+fn health_counts(agents: &[crate::storage::AgentPresence]) -> HealthCounts {
+    let mut counts = HealthCounts::default();
+
+    for agent in agents {
+        match agent_health(&agent.status, agent.last_seen_epoch) {
+            AgentHealth::Working => counts.working = counts.working.saturating_add(1),
+            AgentHealth::Online => counts.online = counts.online.saturating_add(1),
+            AgentHealth::Stale => counts.stale = counts.stale.saturating_add(1),
+            AgentHealth::Offline => counts.offline = counts.offline.saturating_add(1),
+        }
+    }
+
+    counts
+}
+
+fn stale_offline_watchlist(agents: &[crate::storage::AgentPresence]) -> String {
+    let mut flagged = agents
+        .iter()
+        .filter_map(|agent| {
+            let health = agent_health(&agent.status, agent.last_seen_epoch);
+            match health {
+                AgentHealth::Offline | AgentHealth::Stale => {
+                    Some(format!("{}({})", agent.name, health_label(health)))
+                }
+                AgentHealth::Online | AgentHealth::Working => None,
+            }
+        })
+        .collect::<Vec<String>>();
+
+    if flagged.is_empty() {
+        return "none".to_string();
+    }
+
+    flagged.sort();
+    truncate(&flagged.join(", "), 64)
+}
+
+/// Health severity for sorting: 0=offline (worst), 1=stale, 2=online, 3=working.
+fn health_severity(status: &str, last_seen_epoch: u64) -> u8 {
+    match agent_health(status, last_seen_epoch) {
+        AgentHealth::Offline => 0,
+        AgentHealth::Stale => 1,
+        AgentHealth::Online => 2,
+        AgentHealth::Working => 3,
+    }
+}
+
+/// Sort agents by health severity (worst first), then by name within each tier.
+fn sort_agents_by_health(agents: &mut [crate::storage::AgentPresence]) {
+    agents.sort_by(|a, b| {
+        let sa = health_severity(&a.status, a.last_seen_epoch);
+        let sb = health_severity(&b.status, b.last_seen_epoch);
+        sa.cmp(&sb).then_with(|| a.name.cmp(&b.name))
+    });
+}
+
+fn now_unix_secs() -> u64 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    }
+}
+
+fn human_age_short(last_seen_epoch: u64) -> String {
+    let age = now_unix_secs().saturating_sub(last_seen_epoch);
+    if age < 60 {
+        return format!("{age}s");
+    }
+    if age < 3600 {
+        return format!("{}m", age / 60);
+    }
+    if age < 86_400 {
+        return format!("{}h", age / 3600);
+    }
+    format!("{}d", age / 86_400)
+}
+
+fn human_age_long(last_seen_epoch: u64) -> String {
+    let age = now_unix_secs().saturating_sub(last_seen_epoch);
+    if age < 60 {
+        return format!("{age}s");
+    }
+    let minutes = age / 60;
+    if minutes < 60 {
+        return format!("{minutes}m");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h {m}m", m = minutes % 60);
+    }
+    let days = hours / 24;
+    format!("{days}d {h}h", h = hours % 24)
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -855,10 +1015,109 @@ fn truncate(input: &str, max: usize) -> String {
 }
 
 fn human_ts(epoch: &str) -> String {
-    let parsed = epoch.parse::<u64>().unwrap_or(0);
+    let parsed = match epoch.parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => 0,
+    };
     let hhmmss = parsed % 86_400;
     let h = hhmmss / 3600;
     let m = (hhmmss % 3600) / 60;
     let s = hhmmss % 60;
     format!("{h:02}:{m:02}:{s:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::AgentPresence;
+
+    fn agent(name: &str, status: &str, last_seen_epoch: u64) -> AgentPresence {
+        AgentPresence {
+            name: name.to_string(),
+            role: None,
+            status: status.to_string(),
+            task: None,
+            last_seen_epoch,
+        }
+    }
+
+    #[test]
+    fn health_severity_offline_is_lowest() {
+        assert_eq!(super::health_severity("offline", 0), 0);
+        assert_eq!(super::health_severity("online", 0), 0); // age >= 300s => offline
+    }
+
+    #[test]
+    fn health_severity_stale_above_offline() {
+        // 100s ago, not offline status => stale
+        let now = super::now_unix_secs();
+        assert_eq!(super::health_severity("online", now - 100), 1);
+    }
+
+    #[test]
+    fn health_severity_online_above_stale() {
+        let now = super::now_unix_secs();
+        assert_eq!(super::health_severity("online", now - 10), 2);
+    }
+
+    #[test]
+    fn health_severity_working_highest() {
+        let now = super::now_unix_secs();
+        assert_eq!(super::health_severity("working", now - 10), 3);
+    }
+
+    #[test]
+    fn sort_agents_by_health_puts_offline_first() {
+        let now = super::now_unix_secs();
+        let mut agents = vec![
+            agent("alice", "working", now - 5),
+            agent("charlie", "offline", now - 400),
+            agent("bob", "online", now - 10),
+        ];
+        super::sort_agents_by_health(&mut agents);
+        assert_eq!(agents[0].name, "charlie"); // offline first
+        assert_eq!(agents[1].name, "bob"); // online second
+        assert_eq!(agents[2].name, "alice"); // working last
+    }
+
+    #[test]
+    fn sort_agents_by_health_breaks_ties_by_name() {
+        let now = super::now_unix_secs();
+        let mut agents = vec![
+            agent("zebra", "online", now - 10),
+            agent("alpha", "online", now - 10),
+        ];
+        super::sort_agents_by_health(&mut agents);
+        assert_eq!(agents[0].name, "alpha");
+        assert_eq!(agents[1].name, "zebra");
+    }
+
+    #[test]
+    fn sort_agents_stale_before_online() {
+        let now = super::now_unix_secs();
+        let mut agents = vec![
+            agent("online_agent", "online", now - 5),
+            agent("stale_agent", "online", now - 100),
+        ];
+        super::sort_agents_by_health(&mut agents);
+        assert_eq!(agents[0].name, "stale_agent");
+        assert_eq!(agents[1].name, "online_agent");
+    }
+
+    #[test]
+    fn watchlist_only_contains_stale_or_offline() {
+        let now = super::now_unix_secs();
+        let agents = vec![
+            agent("online_agent", "online", now - 5),
+            agent("working_agent", "working", now - 5),
+            agent("stale_agent", "online", now - 100),
+            agent("offline_agent", "offline", now - 400),
+        ];
+
+        let watchlist = super::stale_offline_watchlist(&agents);
+
+        assert!(watchlist.contains("stale_agent(stale)"));
+        assert!(watchlist.contains("offline_agent(offline)"));
+        assert!(!watchlist.contains("online_agent"));
+        assert!(!watchlist.contains("working_agent"));
+    }
 }
