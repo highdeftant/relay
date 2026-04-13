@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    time::SystemTime,
-};
+use std::{collections::HashMap, fs, path::Path, time::SystemTime};
 
 use serde_json::Value;
 
@@ -285,8 +280,11 @@ mod tests {
             .is_ok()
         );
         assert!(
-            fs::write(root.join("processes.json"), r#"[{"name":"relay"},{"name":"hermes"}]"#)
-                .is_ok()
+            fs::write(
+                root.join("processes.json"),
+                r#"[{"name":"relay"},{"name":"hermes"}]"#
+            )
+            .is_ok()
         );
 
         let snapshot = super::load_snapshot_from(&root);

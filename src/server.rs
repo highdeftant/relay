@@ -239,7 +239,9 @@ fn validate_channel_policy(channel: &str, message: &str) -> Result<(), String> {
 
     let is_failure = contains_any(
         &normalized_message,
-        &["fail", "error", "panic", "down", "critical", "incident", "timeout"],
+        &[
+            "fail", "error", "panic", "down", "critical", "incident", "timeout",
+        ],
     );
     let is_review = contains_any(
         &normalized_message,
@@ -254,14 +256,7 @@ fn validate_channel_policy(channel: &str, message: &str) -> Result<(), String> {
     let is_status = contains_any(
         &normalized_message,
         &[
-            "status",
-            "handoff",
-            "starting",
-            "started",
-            "online",
-            "offline",
-            "idle",
-            "working",
+            "status", "handoff", "starting", "started", "online", "offline", "idle", "working",
         ],
     );
 

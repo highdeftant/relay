@@ -222,7 +222,11 @@ mod tests {
     #[test]
     fn channel_cycle_wraps_forward_and_back() {
         let mut state = AppState::new();
-        state.channels = vec!["general".to_string(), "dev".to_string(), "review".to_string()];
+        state.channels = vec![
+            "general".to_string(),
+            "dev".to_string(),
+            "review".to_string(),
+        ];
         state.active_channel = "general".to_string();
 
         state.select_next_channel();

@@ -20,8 +20,7 @@ use crate::{
     app::{AppState, Tab},
     avatar,
     config::AppConfig,
-    hermes,
-    protocol, storage,
+    hermes, protocol, storage,
 };
 
 // Muted, lighter dark theme (no pure black)
@@ -228,8 +227,12 @@ fn handle_key(state: &mut AppState, code: KeyCode, modifiers: KeyModifiers) -> O
         },
         Tab::Chat => match code {
             KeyCode::Enter => return Some(UiAction::SendChatMessage),
-            KeyCode::Char(']') if state.chat_input.is_empty() => return Some(UiAction::NextChannel),
-            KeyCode::Char('[') if state.chat_input.is_empty() => return Some(UiAction::PrevChannel),
+            KeyCode::Char(']') if state.chat_input.is_empty() => {
+                return Some(UiAction::NextChannel);
+            }
+            KeyCode::Char('[') if state.chat_input.is_empty() => {
+                return Some(UiAction::PrevChannel);
+            }
             KeyCode::Backspace => {
                 state.chat_input.pop();
             }
@@ -420,7 +423,12 @@ fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
             .title(Span::styled(
-                format!(" #{}  [{} / {}] ", state.active_channel, state.channels.len(), channels_line),
+                format!(
+                    " #{}  [{} / {}] ",
+                    state.active_channel,
+                    state.channels.len(),
+                    channels_line
+                ),
                 Style::default().fg(COLOR_CYAN),
             )),
     );
@@ -450,19 +458,30 @@ fn draw_chat_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 }
 
 fn draw_knowledge_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let mut lines = vec![Line::from("")];
     let snapshot = &state.hermes_snapshot;
 
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(10)])
+        .split(area);
+
+    let mut lines = vec![Line::from("")];
     lines.push(Line::from(vec![
-        Span::styled("  Hermes skills: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{}", snapshot.skill_count), Style::default().fg(COLOR_GREEN)),
+        Span::styled("  Skills: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            format!("{}", snapshot.skill_count),
+            Style::default().fg(COLOR_GREEN),
+        ),
         Span::styled("   Sessions: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{}", snapshot.session_count), Style::default().fg(COLOR_GREEN)),
+        Span::styled(
+            format!("{}", snapshot.session_count),
+            Style::default().fg(COLOR_GREEN),
+        ),
     ]));
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  skill categories",
+        "  categories",
         Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
     )));
 
@@ -472,7 +491,7 @@ fn draw_knowledge_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_STEEL),
         )));
     } else {
-        for category in snapshot.skill_categories.iter().take(8) {
+        for category in snapshot.skill_categories.iter() {
             lines.push(Line::from(vec![
                 Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
                 Span::styled(category.clone(), Style::default().fg(COLOR_GHOST)),
@@ -482,95 +501,197 @@ fn draw_knowledge_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  recent sessions",
+        "  profiles",
         Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
     )));
 
-    if snapshot.recent_sessions.is_empty() {
+    if snapshot.profile_skill_counts.is_empty() {
         lines.push(Line::from(Span::styled(
             "  none found",
             Style::default().fg(COLOR_STEEL),
         )));
     } else {
-        for session in snapshot.recent_sessions.iter().take(8) {
+        let mut profiles: Vec<_> = snapshot.profile_skill_counts.iter().collect();
+        profiles.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        for (name, count) in profiles.iter() {
             lines.push(Line::from(vec![
                 Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
-                Span::styled(truncate(session, 72), Style::default().fg(COLOR_GHOST)),
+                Span::styled(format!("{name}: "), Style::default().fg(COLOR_GHOST)),
+                Span::styled(format!("{count}"), Style::default().fg(COLOR_AMBER)),
             ]));
         }
     }
 
-    let widget = Paragraph::new(lines).block(
+    let top = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(" HERMES//KNOWLEDGE ", Style::default().fg(COLOR_CYAN))),
+            .title(Span::styled(
+                " HERMES//KNOWLEDGE ",
+                Style::default().fg(COLOR_CYAN),
+            )),
     );
+    frame.render_widget(top, split[0]);
 
-    frame.render_widget(widget, area);
+    let mut recent_lines = vec![Line::from("")];
+    recent_lines.push(Line::from(Span::styled(
+        "  recent sessions",
+        Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+    )));
+
+    if snapshot.recent_sessions.is_empty() {
+        recent_lines.push(Line::from(Span::styled(
+            "  none found",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    } else {
+        for session in snapshot.recent_sessions.iter() {
+            let label = session
+                .replace("session_", "")
+                .replace(".json", "")
+                .replace(".jsonl", "");
+            recent_lines.push(Line::from(vec![
+                Span::styled("   - ", Style::default().fg(COLOR_STEEL)),
+                Span::styled(truncate(&label, 68), Style::default().fg(COLOR_GHOST)),
+            ]));
+        }
+    }
+
+    let bottom = Paragraph::new(recent_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(" SESSIONS ", Style::default().fg(COLOR_CYAN))),
+    );
+    frame.render_widget(bottom, split[1]);
 }
 
 fn draw_memory_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
     let snapshot = &state.hermes_snapshot;
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  state.db: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(
-                if snapshot.state_db_exists {
-                    format!("present ({} bytes)", snapshot.state_db_bytes)
-                } else {
-                    "missing".to_string()
-                },
-                Style::default().fg(if snapshot.state_db_exists {
-                    COLOR_GREEN
-                } else {
-                    COLOR_RED
-                }),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  honcho hosts: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", snapshot.honcho_hosts), Style::default().fg(COLOR_CYAN)),
-        ]),
-        Line::from(vec![
-            Span::styled("  auth.json: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(
-                if snapshot.auth_exists { "present" } else { "missing" },
-                Style::default().fg(if snapshot.auth_exists { COLOR_GREEN } else { COLOR_RED }),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  processes.json: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(
-                if snapshot.processes_file_exists {
-                    format!("present ({} entries)", snapshot.known_process_count)
-                } else {
-                    "missing".to_string()
-                },
-                Style::default().fg(if snapshot.processes_file_exists {
-                    COLOR_GREEN
-                } else {
-                    COLOR_RED
-                }),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Note: relay supports all agents; Hermes adds local skill/session/memory visibility.",
-            Style::default().fg(COLOR_STEEL),
-        )),
-    ];
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(area);
 
-    let widget = Paragraph::new(lines).block(
+    // Top: memory files
+    let mut mem_lines = vec![Line::from("")];
+    let memories = read_memory_files();
+    if memories.is_empty() {
+        mem_lines.push(Line::from(Span::styled(
+            "  no memory files found",
+            Style::default().fg(COLOR_STEEL),
+        )));
+    } else {
+        for (name, content) in &memories {
+            let lines_count = content.lines().count();
+            let preview = content.lines().next().unwrap_or("");
+            mem_lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(COLOR_STEEL)),
+                Span::styled(
+                    format!("{name} "),
+                    Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("({lines_count} lines)"),
+                    Style::default().fg(COLOR_STEEL),
+                ),
+            ]));
+            mem_lines.push(Line::from(vec![
+                Span::styled("    ", Style::default().fg(COLOR_STEEL)),
+                Span::styled(truncate(preview, 72), Style::default().fg(COLOR_GHOST)),
+            ]));
+            mem_lines.push(Line::from(""));
+        }
+    }
+
+    let top = Paragraph::new(mem_lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COLOR_CYAN))
-            .title(Span::styled(" HERMES//MEMORY ", Style::default().fg(COLOR_CYAN))),
+            .title(Span::styled(
+                " MEMORY//FILES ",
+                Style::default().fg(COLOR_CYAN),
+            )),
     );
+    frame.render_widget(top, split[0]);
 
-    frame.render_widget(widget, area);
+    // Bottom: hermes runtime state
+    let mut state_lines = vec![Line::from("")];
+    state_lines.push(Line::from(vec![
+        Span::styled("  state.db: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            if snapshot.state_db_exists {
+                format!("present ({})", human_bytes(snapshot.state_db_bytes))
+            } else {
+                "missing".to_string()
+            },
+            Style::default().fg(if snapshot.state_db_exists {
+                COLOR_GREEN
+            } else {
+                COLOR_RED
+            }),
+        ),
+    ]));
+    state_lines.push(Line::from(vec![
+        Span::styled("  config.yaml: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            if snapshot.config_exists {
+                "present"
+            } else {
+                "missing"
+            },
+            Style::default().fg(if snapshot.config_exists {
+                COLOR_GREEN
+            } else {
+                COLOR_RED
+            }),
+        ),
+    ]));
+    state_lines.push(Line::from(vec![
+        Span::styled("  auth.json: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            if snapshot.auth_exists {
+                "present"
+            } else {
+                "missing"
+            },
+            Style::default().fg(if snapshot.auth_exists {
+                COLOR_GREEN
+            } else {
+                COLOR_RED
+            }),
+        ),
+    ]));
+    state_lines.push(Line::from(vec![
+        Span::styled("  honcho hosts: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            format!("{}", snapshot.honcho_hosts),
+            Style::default().fg(COLOR_CYAN),
+        ),
+    ]));
+    state_lines.push(Line::from(vec![
+        Span::styled("  processes: ", Style::default().fg(COLOR_GHOST)),
+        Span::styled(
+            if snapshot.processes_file_exists {
+                format!("{} known", snapshot.known_process_count)
+            } else {
+                "missing".to_string()
+            },
+            Style::default().fg(COLOR_GHOST),
+        ),
+    ]));
+
+    let bottom = Paragraph::new(state_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COLOR_CYAN))
+            .title(Span::styled(
+                " RUNTIME//STATE ",
+                Style::default().fg(COLOR_CYAN),
+            )),
+    );
+    frame.render_widget(bottom, split[1]);
 }
 
 fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
@@ -590,7 +711,10 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ]),
         Line::from(vec![
             Span::styled("  Data refresh: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{refresh_age} ago"), Style::default().fg(COLOR_GREEN)),
+            Span::styled(
+                format!("{refresh_age} ago"),
+                Style::default().fg(COLOR_GREEN),
+            ),
             Span::styled(format!(" (every 900ms)"), Style::default().fg(COLOR_STEEL)),
         ]),
         Line::from(""),
@@ -603,27 +727,49 @@ fn draw_system_panel(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
         ]),
         Line::from(vec![
             Span::styled("  ● Online: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", counts.online), Style::default().fg(COLOR_GREEN)),
+            Span::styled(
+                format!("{}", counts.online),
+                Style::default().fg(COLOR_GREEN),
+            ),
             Span::styled("  ◆ Working: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", counts.working), Style::default().fg(COLOR_AMBER)),
+            Span::styled(
+                format!("{}", counts.working),
+                Style::default().fg(COLOR_AMBER),
+            ),
             Span::styled("  ◐ Stale: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", counts.stale), Style::default().fg(COLOR_ORANGE)),
+            Span::styled(
+                format!("{}", counts.stale),
+                Style::default().fg(COLOR_ORANGE),
+            ),
             Span::styled("  ○ Offline: ", Style::default().fg(COLOR_GHOST)),
-            Span::styled(format!("{}", counts.offline), Style::default().fg(COLOR_RED)),
+            Span::styled(
+                format!("{}", counts.offline),
+                Style::default().fg(COLOR_RED),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Attention: ", Style::default().fg(COLOR_GHOST)),
             Span::styled(
                 stale_offline_watchlist(&state.agents),
-                Style::default().fg(if counts.offline > 0 { COLOR_RED } else { COLOR_ORANGE }),
+                Style::default().fg(if counts.offline > 0 {
+                    COLOR_RED
+                } else {
+                    COLOR_ORANGE
+                }),
             ),
         ]),
         Line::from(vec![
             Span::styled("  Thresholds: ", Style::default().fg(COLOR_GHOST)),
             Span::styled("stale=", Style::default().fg(COLOR_STEEL)),
-            Span::styled(format!("{AGENT_STALE_SECS}s"), Style::default().fg(COLOR_ORANGE)),
+            Span::styled(
+                format!("{AGENT_STALE_SECS}s"),
+                Style::default().fg(COLOR_ORANGE),
+            ),
             Span::styled("  offline=", Style::default().fg(COLOR_STEEL)),
-            Span::styled(format!("{AGENT_OFFLINE_SECS}s"), Style::default().fg(COLOR_RED)),
+            Span::styled(
+                format!("{AGENT_OFFLINE_SECS}s"),
+                Style::default().fg(COLOR_RED),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Active channel: ", Style::default().fg(COLOR_GHOST)),
@@ -755,13 +901,25 @@ fn draw_agents_list(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             Style::default().fg(COLOR_GREEN),
         ),
         Span::styled(" | ONLINE: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", counts.online), Style::default().fg(COLOR_GREEN)),
+        Span::styled(
+            format!("{:02}", counts.online),
+            Style::default().fg(COLOR_GREEN),
+        ),
         Span::styled(" | WORKING: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", counts.working), Style::default().fg(COLOR_AMBER)),
+        Span::styled(
+            format!("{:02}", counts.working),
+            Style::default().fg(COLOR_AMBER),
+        ),
         Span::styled(" | STALE: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", counts.stale), Style::default().fg(COLOR_ORANGE)),
+        Span::styled(
+            format!("{:02}", counts.stale),
+            Style::default().fg(COLOR_ORANGE),
+        ),
         Span::styled(" | OFFLINE: ", Style::default().fg(COLOR_GHOST)),
-        Span::styled(format!("{:02}", counts.offline), Style::default().fg(COLOR_RED)),
+        Span::styled(
+            format!("{:02}", counts.offline),
+            Style::default().fg(COLOR_RED),
+        ),
     ]));
 
     let widget = Paragraph::new(lines).block(
@@ -962,6 +1120,41 @@ fn sort_agents_by_health(agents: &mut [crate::storage::AgentPresence]) {
         let sb = health_severity(&b.status, b.last_seen_epoch);
         sa.cmp(&sb).then_with(|| a.name.cmp(&b.name))
     });
+}
+
+fn read_memory_files() -> Vec<(String, String)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.is_empty() {
+        return Vec::new();
+    }
+    let memories_dir = std::path::Path::new(&home).join(".hermes").join("memories");
+    if !memories_dir.exists() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let targets = ["USER.md", "MEMORY.md"];
+    for name in targets {
+        let path = memories_dir.join(name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let trimmed = content.trim().to_string();
+            if !trimmed.is_empty() {
+                out.push((name.to_string(), trimmed));
+            }
+        }
+    }
+    out
+}
+
+fn human_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1024.0 {
+        return format!("{kb:.1} KB");
+    }
+    let mb = kb / 1024.0;
+    format!("{mb:.1} MB")
 }
 
 fn now_unix_secs() -> u64 {
