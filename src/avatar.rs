@@ -70,11 +70,11 @@ fn hash_seed(seed: &str, extra: Option<&str>) -> [u8; 32] {
 /// from the hash bytes, then mirrored radially so the avatar looks like a
 /// sigil, glyph, or mandala.
 fn radial_symmetry(hash: &[u8; 32], w: usize, h: usize, slices: usize) -> Vec<Vec<bool>> {
-    // Phase offset from first 4 bytes — rotates the whole pattern
+    // Use the first 4 bytes as a phase so each seed rotates the radial layout.
     let phase = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) as f64 / (u32::MAX as f64)
         * std::f64::consts::TAU;
 
-    // Pattern data from remaining bytes
+    // Expand remaining bytes into deterministic on/off pattern bits.
     let pattern: Vec<bool> = hash[4..]
         .iter()
         .flat_map(|&byte| (0..8).map(move |bit| byte & (1 << bit) != 0))
@@ -97,16 +97,9 @@ fn radial_symmetry(hash: &[u8; 32], w: usize, h: usize, slices: usize) -> Vec<Ve
                 continue;
             }
 
-            // Angle with phase offset, normalized to [0, TAU)
             let angle = (dy.atan2(dx) + phase).rem_euclid(std::f64::consts::TAU);
-
-            // Which radial slice
             let slice_idx = (angle / std::f64::consts::TAU * slices as f64) as usize % slices;
-
-            // Radial band index
             let band = (r * 8.0) as usize;
-
-            // Index into pattern data
             let idx = (band * slices + slice_idx) % pattern_len;
             grid[y][x] = pattern[idx];
         }
@@ -175,17 +168,6 @@ pub fn render_boxed(avatar: &Avatar, label: &str) -> String {
     out.push('┘');
 
     out
-}
-
-/// Helper: convert a byte slice to a bool grid for debugging.
-#[allow(dead_code)]
-fn print_grid(grid: &[Vec<bool>]) {
-    for row in grid {
-        for &cell in row {
-            print!("{}", if cell { "█" } else { " " });
-        }
-        println!();
-    }
 }
 
 #[cfg(test)]

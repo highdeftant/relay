@@ -1,8 +1,10 @@
 //! Application state for the TUI dashboard.
 
 use crate::{
+    gateway_health::ProfileHealth,
     hermes::HermesSnapshot,
     storage::{AgentPresence, MessageEvent},
+    types::UnixEpochSecs,
 };
 
 /// Which tab is currently active.
@@ -77,23 +79,25 @@ pub struct AppState {
     pub chat_agent: String,
     pub logs: Vec<String>,
     pub hermes_snapshot: HermesSnapshot,
+    pub gateway_health: Vec<ProfileHealth>,
     pub should_quit: bool,
-    pub last_refresh_unix: u64,
+    pub last_refresh_unix: UnixEpochSecs,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            active_tab: Tab::Agents,
+            active_tab: Tab::Chat,
             agents: Vec::new(),
             selected_agent: 0,
             channels: vec!["general".into()],
             active_channel: "general".into(),
             messages: Vec::new(),
             chat_input: String::new(),
-            chat_agent: "local".into(),
+            chat_agent: "hermes".into(),
             logs: Vec::new(),
             hermes_snapshot: HermesSnapshot::default(),
+            gateway_health: Vec::new(),
             should_quit: false,
             last_refresh_unix: 0,
         }
@@ -199,15 +203,22 @@ impl AppState {
 mod tests {
     use super::{AppState, Tab};
     use crate::storage::AgentPresence;
+    use crate::types::{AgentName, AgentRole, AgentStatus};
+
+    #[test]
+    fn default_state_starts_in_chat_tab() {
+        let state = AppState::new();
+        assert_eq!(state.active_tab, Tab::Chat);
+    }
 
     #[test]
     fn open_dm_with_selected_creates_stable_channel_and_switches_to_chat() {
         let mut state = AppState::new();
         state.chat_agent = "hermes".to_string();
         state.agents = vec![AgentPresence::new(
-            "codex".to_string(),
-            Some("coder".to_string()),
-            "online".to_string(),
+            AgentName::from("codex"),
+            Some(AgentRole::from("coder")),
+            AgentStatus::from("online"),
             None,
         )];
         state.selected_agent = 0;

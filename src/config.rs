@@ -12,7 +12,6 @@ pub struct AppConfig {
     pub agents_file: PathBuf,
     pub socket_path: PathBuf,
     pub tcp_port: u16,
-    pub http_port: u16,
 }
 
 impl AppConfig {
@@ -29,7 +28,6 @@ impl AppConfig {
             socket_path: data_dir.join("relay.sock"),
             data_dir,
             tcp_port: 7777,
-            http_port: 7778,
         })
     }
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, time::SystemTime};
+use std::{collections::HashMap, fs, io::ErrorKind, path::Path, time::SystemTime};
 
 use serde_json::Value;
 
@@ -70,7 +70,13 @@ struct SessionEntry {
 }
 
 fn count_skill_files(skills_root: &Path) -> usize {
-    count_skill_files_recursive(skills_root).unwrap_or(0)
+    match count_skill_files_recursive(skills_root) {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::debug!(path = %skills_root.display(), "failed to count skill files: {error}");
+            0
+        }
+    }
 }
 
 fn count_skill_files_recursive(path: &Path) -> std::io::Result<usize> {
@@ -104,13 +110,28 @@ fn read_skill_categories(skills_root: &Path) -> Vec<String> {
     let mut categories = Vec::new();
     let entries = match fs::read_dir(skills_root) {
         Ok(rows) => rows,
-        Err(_) => return categories,
+        Err(error) if error.kind() == ErrorKind::NotFound => return categories,
+        Err(error) => {
+            tracing::debug!(path = %skills_root.display(), "failed to read skills root: {error}");
+            return categories;
+        }
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(path = %skills_root.display(), "failed to read skills directory entry: {error}");
+                continue;
+            }
+        };
+
         let is_dir = match entry.file_type() {
             Ok(kind) => kind.is_dir(),
-            Err(_) => false,
+            Err(error) => {
+                tracing::debug!(path = %entry.path().display(), "failed to determine skills entry type: {error}");
+                continue;
+            }
         };
 
         if !is_dir {
@@ -135,13 +156,28 @@ fn read_profile_skill_counts(profiles_root: &Path) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     let rows = match fs::read_dir(profiles_root) {
         Ok(rows) => rows,
-        Err(_) => return counts,
+        Err(error) if error.kind() == ErrorKind::NotFound => return counts,
+        Err(error) => {
+            tracing::debug!(path = %profiles_root.display(), "failed to read profiles root: {error}");
+            return counts;
+        }
     };
 
-    for row in rows.flatten() {
+    for row in rows {
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::debug!(path = %profiles_root.display(), "failed to read profile entry: {error}");
+                continue;
+            }
+        };
+
         let is_dir = match row.file_type() {
             Ok(kind) => kind.is_dir(),
-            Err(_) => false,
+            Err(error) => {
+                tracing::debug!(path = %row.path().display(), "failed to determine profile entry type: {error}");
+                continue;
+            }
         };
         if !is_dir {
             continue;
@@ -166,10 +202,22 @@ fn read_sessions(sessions_root: &Path) -> Vec<SessionEntry> {
     let mut out = Vec::new();
     let rows = match fs::read_dir(sessions_root) {
         Ok(rows) => rows,
-        Err(_) => return out,
+        Err(error) if error.kind() == ErrorKind::NotFound => return out,
+        Err(error) => {
+            tracing::debug!(path = %sessions_root.display(), "failed to read sessions root: {error}");
+            return out;
+        }
     };
 
-    for row in rows.flatten() {
+    for row in rows {
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::debug!(path = %sessions_root.display(), "failed to read session entry: {error}");
+                continue;
+            }
+        };
+
         let path = row.path();
         if !path.is_file() {
             continue;
@@ -190,7 +238,10 @@ fn read_sessions(sessions_root: &Path) -> Vec<SessionEntry> {
 
         let modified = match fs::metadata(&path).and_then(|m| m.modified()) {
             Ok(ts) => ts,
-            Err(_) => SystemTime::UNIX_EPOCH,
+            Err(error) => {
+                tracing::debug!(path = %path.display(), "failed to read session modified timestamp: {error}");
+                SystemTime::UNIX_EPOCH
+            }
         };
 
         out.push(SessionEntry { name, modified });
@@ -202,12 +253,19 @@ fn read_sessions(sessions_root: &Path) -> Vec<SessionEntry> {
 fn read_honcho_host_count(path: &Path) -> usize {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(_) => return 0,
+        Err(error) if error.kind() == ErrorKind::NotFound => return 0,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), "failed to read honcho metadata: {error}");
+            return 0;
+        }
     };
 
     let value = match serde_json::from_str::<Value>(&raw) {
         Ok(value) => value,
-        Err(_) => return 0,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), "failed to parse honcho metadata: {error}");
+            return 0;
+        }
     };
 
     match value.get("hosts") {
@@ -219,12 +277,19 @@ fn read_honcho_host_count(path: &Path) -> usize {
 fn read_process_count(path: &Path) -> usize {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(_) => return 0,
+        Err(error) if error.kind() == ErrorKind::NotFound => return 0,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), "failed to read process metadata: {error}");
+            return 0;
+        }
     };
 
     let value = match serde_json::from_str::<Value>(&raw) {
         Ok(value) => value,
-        Err(_) => return 0,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), "failed to parse process metadata: {error}");
+            return 0;
+        }
     };
 
     match value {

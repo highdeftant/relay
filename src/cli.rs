@@ -15,7 +15,7 @@ pub enum Commands {
     Watch,
     /// Send a message to a channel
     Send {
-        #[arg(short, long, default_value = "local")]
+        #[arg(short, long, default_value = "hermes")]
         agent: String,
         #[arg(short, long, default_value = "general")]
         channel: String,
@@ -38,6 +38,15 @@ pub enum Commands {
         #[arg(long)]
         task: Option<String>,
     },
+    /// List recent messages in a channel
+    List {
+        #[arg(short, long, default_value = "general")]
+        channel: String,
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
+    /// List available channels
+    Channels,
     /// List known agent statuses
     Agents,
     /// Initialize local relay data layout

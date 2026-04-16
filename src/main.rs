@@ -27,6 +27,10 @@ async fn main() -> Result<()> {
             task,
         } => relay::protocol::heartbeat_agent(config, agent, status, task).await?,
         Commands::Agents => relay::protocol::print_agents(config).await?,
+        Commands::List { channel, limit } => {
+            relay::protocol::list_messages(config, channel, limit).await?
+        }
+        Commands::Channels => relay::protocol::print_channels(config).await?,
         Commands::Init => relay::storage::init_layout(&config)?,
     }
 

@@ -1,35 +1,44 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream, UnixListener, UnixStream},
+    net::{TcpListener, UnixListener},
     sync::RwLock,
 };
 
 use crate::{
     config::AppConfig,
+    profiles::{load_hermes_admission_allowlist, normalize_agent_name},
     protocol::{ClientRequest, ServerResponse},
     storage::{AgentPresence, MessageEvent},
+    types::{AgentName, AgentStatus},
 };
 
 #[derive(Clone)]
 struct SharedState {
     config: AppConfig,
-    agents: Arc<RwLock<HashMap<String, AgentPresence>>>,
+    agents: Arc<RwLock<HashMap<AgentName, AgentPresence>>>,
+    allowed_agents: Arc<HashSet<String>>,
 }
 
 pub async fn serve(config: AppConfig) -> Result<()> {
     crate::storage::init_layout(&config)?;
 
-    if socket_exists(&config.socket_path) {
+    if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)?;
     }
 
     let known_agents = crate::storage::load_agents(&config)?;
+    let allowed_agents = Arc::new(load_allowed_agents(&config));
+
     let state = SharedState {
         config: config.clone(),
         agents: Arc::new(RwLock::new(known_agents)),
+        allowed_agents,
     };
 
     let unix_listener = UnixListener::bind(&config.socket_path)?;
@@ -48,7 +57,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
                     Ok((stream, _addr)) => {
                         let state_clone = state.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = handle_unix_connection(stream, state_clone).await {
+                            if let Err(error) = handle_stream(stream, state_clone).await {
                                 tracing::warn!("unix client error: {error}");
                             }
                         });
@@ -63,7 +72,7 @@ pub async fn serve(config: AppConfig) -> Result<()> {
                     Ok((stream, addr)) => {
                         let state_clone = state.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = handle_tcp_connection(stream, state_clone).await {
+                            if let Err(error) = handle_stream(stream, state_clone).await {
                                 tracing::warn!(peer = %addr, "tcp client error: {error}");
                             }
                         });
@@ -75,14 +84,6 @@ pub async fn serve(config: AppConfig) -> Result<()> {
             }
         }
     }
-}
-
-async fn handle_unix_connection(stream: UnixStream, state: SharedState) -> Result<()> {
-    handle_stream(stream, state).await
-}
-
-async fn handle_tcp_connection(stream: TcpStream, state: SharedState) -> Result<()> {
-    handle_stream(stream, state).await
 }
 
 async fn handle_stream<T>(stream: T, state: SharedState) -> Result<()>
@@ -123,6 +124,10 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             channel,
             message,
         } => {
+            if let Some(response) = ensure_agent_allowed(state, &agent) {
+                return response;
+            }
+
             if let Err(policy_error) = validate_channel_policy(&channel, &message) {
                 return ServerResponse::Error {
                     message: policy_error,
@@ -138,14 +143,12 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
 
             let mut agents = state.agents.write().await;
             let entry = agents.entry(agent.clone()).or_insert_with(|| {
-                AgentPresence::new(agent.clone(), None, "idle".to_string(), None)
+                AgentPresence::new(agent.clone(), None, AgentStatus::from("idle"), None)
             });
-            entry.heartbeat(Some("idle".to_string()), None);
+            entry.heartbeat(Some(AgentStatus::from("idle")), None);
 
-            if let Err(error) = crate::storage::save_agents(&state.config, &agents) {
-                return ServerResponse::Error {
-                    message: format!("failed to persist agents: {error}"),
-                };
+            if let Some(response) = save_agents_or_error(&state.config, &agents) {
+                return response;
             }
 
             ServerResponse::Ok {
@@ -153,18 +156,20 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             }
         }
         ClientRequest::Join { agent, role } => {
+            if let Some(response) = ensure_agent_allowed(state, &agent) {
+                return response;
+            }
+
             let mut agents = state.agents.write().await;
-            let status = "online".to_string();
+            let status = AgentStatus::from("online");
             let entry = agents.entry(agent.clone()).or_insert_with(|| {
                 AgentPresence::new(agent.clone(), role.clone(), status.clone(), None)
             });
             entry.role = role;
             entry.heartbeat(Some(status), None);
 
-            if let Err(error) = crate::storage::save_agents(&state.config, &agents) {
-                return ServerResponse::Error {
-                    message: format!("failed to persist agents: {error}"),
-                };
+            if let Some(response) = save_agents_or_error(&state.config, &agents) {
+                return response;
             }
 
             ServerResponse::Ok {
@@ -176,16 +181,18 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             status,
             task,
         } => {
+            if let Some(response) = ensure_agent_allowed(state, &agent) {
+                return response;
+            }
+
             let mut agents = state.agents.write().await;
             let entry = agents.entry(agent.clone()).or_insert_with(|| {
-                AgentPresence::new(agent.clone(), None, "online".to_string(), None)
+                AgentPresence::new(agent.clone(), None, AgentStatus::from("online"), None)
             });
             entry.heartbeat(status, task);
 
-            if let Err(error) = crate::storage::save_agents(&state.config, &agents) {
-                return ServerResponse::Error {
-                    message: format!("failed to persist agents: {error}"),
-                };
+            if let Some(response) = save_agents_or_error(&state.config, &agents) {
+                return response;
             }
 
             ServerResponse::Ok {
@@ -198,11 +205,13 @@ async fn process_request(state: &SharedState, request: ClientRequest) -> ServerR
             rows.sort_by(|a, b| a.name.cmp(&b.name));
             ServerResponse::Agents { agents: rows }
         }
-        ClientRequest::Ping => ServerResponse::Pong,
         ClientRequest::List { channel, limit } => {
             let max = limit.unwrap_or(50);
             match crate::storage::load_channel_events(&state.config, &channel, max) {
-                Ok(events) => ServerResponse::Messages { channel, events },
+                Ok(events) => ServerResponse::Messages {
+                    channel: channel.into(),
+                    events,
+                },
                 Err(error) => ServerResponse::Error {
                     message: format!("list failed: {error}"),
                 },
@@ -228,20 +237,38 @@ where
     Ok(())
 }
 
-fn socket_exists(path: &Path) -> bool {
-    path.exists()
+fn load_allowed_agents(_config: &AppConfig) -> HashSet<String> {
+    load_hermes_admission_allowlist()
 }
 
-#[allow(dead_code)]
-fn into_error_response(error: anyhow::Error) -> ServerResponse {
-    ServerResponse::Error {
-        message: format!("{error}"),
+fn is_agent_allowed(state: &SharedState, agent: &str) -> bool {
+    let normalized = normalize_agent_name(agent);
+    !normalized.is_empty() && state.allowed_agents.contains(&normalized)
+}
+
+fn ensure_agent_allowed(state: &SharedState, agent: &str) -> Option<ServerResponse> {
+    if is_agent_allowed(state, agent) {
+        return None;
     }
+
+    Some(ServerResponse::Error {
+        message: format!(
+            "agent '{}' is not allowed (Relay allows only local Hermes profiles)",
+            agent
+        ),
+    })
 }
 
-#[allow(dead_code)]
-fn to_anyhow(message: &str) -> anyhow::Error {
-    anyhow!(message.to_string())
+fn save_agents_or_error(
+    config: &AppConfig,
+    agents: &HashMap<AgentName, AgentPresence>,
+) -> Option<ServerResponse> {
+    match crate::storage::save_agents(config, agents) {
+        Ok(()) => None,
+        Err(error) => Some(ServerResponse::Error {
+            message: format!("failed to persist agents: {error}"),
+        }),
+    }
 }
 
 fn validate_channel_policy(channel: &str, message: &str) -> Result<(), String> {
@@ -302,6 +329,8 @@ fn is_dm_channel(channel: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     #[test]
     fn policy_rejects_failure_outside_alerts() {
         let result = super::validate_channel_policy("dev", "build failed with error");
@@ -324,5 +353,31 @@ mod tests {
     fn policy_accepts_dm_anything() {
         let result = super::validate_channel_policy("dm-codex__hermes", "status update here");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn profile_allowlist_reads_and_normalizes_names() {
+        let root =
+            std::env::temp_dir().join(format!("relay-allowlist-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&root);
+        let profiles_path = root.join("profiles.json");
+
+        let payload = r#"[
+            {"name":"Hermes","role":"coordinator","created":"2026-01-01","bio":"","skills":[],"color":"cyan","avatar":"default","avatar_file":null},
+            {"name":" Codex ","role":"coder","created":"2026-01-01","bio":"","skills":[],"color":"green","avatar":"default","avatar_file":null}
+        ]"#;
+        assert!(fs::write(&profiles_path, payload).is_ok());
+
+        let allowed = crate::profiles::load_profile_allowlist(&profiles_path);
+        assert!(allowed.contains("hermes"));
+        assert!(allowed.contains("codex"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn normalize_agent_name_is_case_insensitive() {
+        assert_eq!(crate::profiles::normalize_agent_name(" Hermes "), "hermes");
+        assert_eq!(crate::profiles::normalize_agent_name("CoDeX"), "codex");
     }
 }

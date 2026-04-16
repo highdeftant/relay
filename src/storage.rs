@@ -3,20 +3,24 @@ use std::{collections::HashMap, fs, io::Write, path::Path, time::SystemTime};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::AppConfig, profiles::AgentProfile};
+use crate::{
+    config::AppConfig,
+    profiles::AgentProfile,
+    types::{AgentName, AgentRole, AgentStatus, AgentTask, ChannelName, UnixEpochSecs},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageEvent {
-    pub agent: String,
-    pub channel: String,
+    pub agent: AgentName,
+    pub channel: ChannelName,
     pub message: String,
     pub timestamp: String,
 }
 
 impl MessageEvent {
     pub fn new(
-        agent: impl Into<String>,
-        channel: impl Into<String>,
+        agent: impl Into<AgentName>,
+        channel: impl Into<ChannelName>,
         message: impl Into<String>,
     ) -> Self {
         Self {
@@ -30,15 +34,20 @@ impl MessageEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentPresence {
-    pub name: String,
-    pub role: Option<String>,
-    pub status: String,
-    pub task: Option<String>,
-    pub last_seen_epoch: u64,
+    pub name: AgentName,
+    pub role: Option<AgentRole>,
+    pub status: AgentStatus,
+    pub task: Option<AgentTask>,
+    pub last_seen_epoch: UnixEpochSecs,
 }
 
 impl AgentPresence {
-    pub fn new(name: String, role: Option<String>, status: String, task: Option<String>) -> Self {
+    pub fn new(
+        name: AgentName,
+        role: Option<AgentRole>,
+        status: AgentStatus,
+        task: Option<AgentTask>,
+    ) -> Self {
         Self {
             name,
             role,
@@ -48,7 +57,7 @@ impl AgentPresence {
         }
     }
 
-    pub fn heartbeat(&mut self, status: Option<String>, task: Option<String>) {
+    pub fn heartbeat(&mut self, status: Option<AgentStatus>, task: Option<AgentTask>) {
         if let Some(new_status) = status {
             self.status = new_status;
         }
@@ -94,7 +103,7 @@ pub fn append_event(config: &AppConfig, event: &MessageEvent) -> Result<()> {
     Ok(())
 }
 
-pub fn load_agents(config: &AppConfig) -> Result<HashMap<String, AgentPresence>> {
+pub fn load_agents(config: &AppConfig) -> Result<HashMap<AgentName, AgentPresence>> {
     if !config.agents_file.exists() {
         return Ok(HashMap::new());
     }
@@ -108,12 +117,12 @@ pub fn load_agents(config: &AppConfig) -> Result<HashMap<String, AgentPresence>>
     let map = rows
         .into_iter()
         .map(|entry| (entry.name.clone(), entry))
-        .collect::<HashMap<String, AgentPresence>>();
+        .collect::<HashMap<AgentName, AgentPresence>>();
 
     Ok(map)
 }
 
-pub fn save_agents(config: &AppConfig, agents: &HashMap<String, AgentPresence>) -> Result<()> {
+pub fn save_agents(config: &AppConfig, agents: &HashMap<AgentName, AgentPresence>) -> Result<()> {
     ensure_parent(&config.agents_file)?;
 
     let mut rows = agents.values().cloned().collect::<Vec<AgentPresence>>();
@@ -137,14 +146,33 @@ pub fn load_channel_events(
     let content = fs::read_to_string(path)?;
     let mut events = Vec::new();
 
-    for line in content.lines() {
+    let mut invalid_lines = 0usize;
+    let mut first_invalid: Option<(usize, String)> = None;
+
+    for (line_idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(event) = serde_json::from_str::<MessageEvent>(trimmed) {
-            events.push(event);
+
+        match serde_json::from_str::<MessageEvent>(trimmed) {
+            Ok(event) => events.push(event),
+            Err(error) => {
+                invalid_lines = invalid_lines.saturating_add(1);
+                if first_invalid.is_none() {
+                    first_invalid = Some((line_idx + 1, error.to_string()));
+                }
+            }
         }
+    }
+
+    if let Some((line, error)) = first_invalid {
+        tracing::warn!(
+            channel,
+            invalid_lines,
+            first_invalid_line = line,
+            "ignored malformed channel event rows: {error}"
+        );
     }
 
     if events.len() > limit {
@@ -206,7 +234,7 @@ fn default_profiles() -> Vec<AgentProfile> {
     }]
 }
 
-fn unix_timestamp_secs() -> u64 {
+fn unix_timestamp_secs() -> UnixEpochSecs {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(duration) => duration.as_secs(),
         Err(_) => 0,
