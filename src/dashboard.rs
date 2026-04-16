@@ -158,6 +158,12 @@ fn refresh_state(config: &AppConfig, state: &mut AppState) {
         Ok(map) => {
             let mut rows = map.into_values().collect::<Vec<_>>();
             rows.retain(|agent| allowed_profiles.contains(&agent.name.to_lowercase()));
+            merge_discovered_agents(
+                &mut rows,
+                &state.gateway_health,
+                &allowed_profiles,
+                state.last_refresh_unix,
+            );
             sort_agents_by_health(&mut rows);
             state.agents = rows;
             state.clamp_selection();
@@ -184,6 +190,40 @@ fn refresh_state(config: &AppConfig, state: &mut AppState) {
     }
 
     trim_logs(&mut state.logs);
+}
+
+fn merge_discovered_agents(
+    agents: &mut Vec<storage::AgentPresence>,
+    health: &[gateway_health::ProfileHealth],
+    allowed_profiles: &std::collections::HashSet<String>,
+    now: UnixEpochSecs,
+) {
+    for endpoint_health in health {
+        if !endpoint_health.reachable {
+            continue;
+        }
+
+        let profile = endpoint_health.profile.trim().to_lowercase();
+        if profile.is_empty() || !allowed_profiles.contains(&profile) {
+            continue;
+        }
+
+        let already_present = agents
+            .iter()
+            .any(|agent| agent.name.as_ref().eq_ignore_ascii_case(&profile));
+        if already_present {
+            continue;
+        }
+
+        let endpoint = endpoint_health.endpoint.clone();
+        agents.push(storage::AgentPresence {
+            name: profile.into(),
+            role: Some("discovered".into()),
+            status: "online".into(),
+            task: Some(format!("port-scan: {endpoint}").into()),
+            last_seen_epoch: now,
+        });
+    }
 }
 
 fn push_log(state: &mut AppState, message: String) {
@@ -1431,7 +1471,10 @@ fn human_ts(epoch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::{
+        gateway_health::ProfileHealth,
         storage::AgentPresence,
         types::{AgentName, AgentStatus, UnixEpochSecs},
     };
@@ -1744,5 +1787,60 @@ mod tests {
         assert_eq!(counts.online, 1);
         assert_eq!(counts.warning, 1);
         assert_eq!(counts.stale, 1);
+    }
+
+    #[test]
+    fn merge_discovered_agents_adds_reachable_missing_profiles() {
+        let now = super::now_unix_secs();
+        let mut agents = vec![agent("hermes", "online", now - 5)];
+        let health = vec![
+            ProfileHealth {
+                profile: "spoof".into(),
+                endpoint: "127.0.0.1:8645".into(),
+                reachable: true,
+                latency_ms: Some(2),
+            },
+            ProfileHealth {
+                profile: "tracie".into(),
+                endpoint: "127.0.0.1:8646".into(),
+                reachable: false,
+                latency_ms: None,
+            },
+        ];
+        let allowed = HashSet::from([
+            "hermes".to_string(),
+            "spoof".to_string(),
+            "tracie".to_string(),
+        ]);
+
+        super::merge_discovered_agents(&mut agents, &health, &allowed, now);
+
+        assert!(agents.iter().any(|a| a.name.as_ref() == "spoof"));
+        assert!(!agents.iter().any(|a| a.name.as_ref() == "tracie"));
+    }
+
+    #[test]
+    fn merge_discovered_agents_keeps_existing_agent_unchanged() {
+        let now = super::now_unix_secs();
+        let mut agents = vec![AgentPresence {
+            name: AgentName::from("spoof"),
+            role: Some("coder".into()),
+            status: "working".into(),
+            task: Some("active".into()),
+            last_seen_epoch: now - 1,
+        }];
+        let health = vec![ProfileHealth {
+            profile: "spoof".into(),
+            endpoint: "127.0.0.1:8645".into(),
+            reachable: true,
+            latency_ms: Some(1),
+        }];
+        let allowed = HashSet::from(["spoof".to_string()]);
+
+        super::merge_discovered_agents(&mut agents, &health, &allowed, now);
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].status.as_ref(), "working");
+        assert_eq!(agents[0].role.as_ref().map(|r| r.as_ref()), Some("coder"));
     }
 }
